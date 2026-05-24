@@ -105,7 +105,7 @@ const app = {
       ? '✓ Web Serial available — click CONNECT USB'
       : '✗ Open in Chrome or Edge (Web Serial required)'},
   ],
-  cmdInput:'', jogStep:1, jogStepZ:1, jogFeed:4000, spindleSpeed:10000, homing:false,
+  cmdInput:'', jogStep:1, jogStepZ:1, jogFeed:4000, spindleSpeed:10000, homing:false, alVerbose:false,
   gfile:null, glines:[], progress:0, sending:false, stopSend:false, jobTimeEst:null,
   notification:null, notifyTimer:null,
   vizPaths:[], vizBounds:{minX:0,maxX:100,minY:0,maxY:100},
@@ -678,7 +678,12 @@ class GcodeProcessor {
     const correction=getZCorrection(this.cx,this.cy);
     const zCorr=(zWork+correction).toFixed(4);
     this.cz=zWork;
-    return line.replace(/[Zz]-?\d+\.?\d*(?:[eE][+-]?\d+)?/i,'Z'+zCorr);
+    const corrected=line.replace(/[Zz]-?\d+\.?\d*(?:[eE][+-]?\d+)?/i,'Z'+zCorr);
+    // Log the correction when verbose mode is on
+    if(app.alVerbose&&Math.abs(correction)>0.0001){
+      addLog(`  AL Z${nz.toFixed(4)} → Z${zCorr} (${correction>=0?'+':''}${correction.toFixed(4)})`,'sys');
+    }
+    return corrected;
   }
 }
 
@@ -1389,8 +1394,30 @@ function buildPanel(p){
         br.appendChild(mkBtn('⬛  STOP',stopFile,'#ef4444',{full:true}));
       }
       body.appendChild(br);
-      if(app.autolevel.enabled&&app.autolevel.measured)
-        body.appendChild(h('div',{style:{fontSize:'10px',color:'#06b6d4',marginTop:'4px'}},'⬛ AL active'));
+      if(app.autolevel.enabled&&app.autolevel.measured){
+        const alRow=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',marginTop:'4px'}});
+        alRow.appendChild(h('div',{style:{fontSize:'10px',color:'#06b6d4',flex:'1'}},'⬛ Autolevel active'));
+        // Verbose toggle
+        const vLbl=h('label',{style:{display:'flex',alignItems:'center',gap:'4px',
+          fontSize:'10px',color:C.muted,cursor:'pointer'}});
+        const vChk=h('input',{type:'checkbox',style:{cursor:'pointer'}});
+        vChk.checked=!!app.alVerbose;
+        vChk.addEventListener('change',e=>{app.alVerbose=e.target.checked;});
+        vLbl.appendChild(vChk);
+        vLbl.appendChild(document.createTextNode('log corrections'));
+        alRow.appendChild(vLbl);
+        body.appendChild(alRow);
+        // Live correction at current XY
+        if(app.sending){
+          const mpos=app.grbl.MPos||[0,0,0];
+          const wco=app.grbl.WCO||[0,0,0];
+          const wx=mpos[0]-wco[0], wy=mpos[1]-wco[1];
+          const corr=getZCorrection(wx,wy);
+          body.appendChild(h('div',{style:{fontSize:'10px',color:'#06b6d4',
+            background:'#06b6d410',borderRadius:'4px',padding:'3px 6px',marginTop:'2px'}},
+            `Current Z correction: ${corr>=0?'+':''}${corr.toFixed(4)}mm @ X${wx.toFixed(1)} Y${wy.toFixed(1)}`));
+        }
+      }
     }
   }
 
