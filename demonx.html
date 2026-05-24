@@ -686,9 +686,23 @@ async function sendLine(cmd){
   try{await waitForOk(15000);}catch(e){throw e;}
 }
 
+function broadcastJob(running){
+  if(app.transport==='websocket'&&app.wsConn?.readyState===1){
+    app.wsConn.send(JSON.stringify({
+      cmd:'jobUpdate',
+      file: app.gfile,
+      totalLines: app.glines.length,
+      sentLines:  app.progress ? Math.round(app.progress/100*app.glines.length) : 0,
+      progress:   app.progress,
+      running,
+    }));
+  }
+}
+
 async function runFile(){
   if(!app.glines.length||!app.connected||app.sending) return;
   app.sending=true; app.stopSend=false; app.okQueue=[]; render();
+  broadcastJob(true);
   const proc=new GcodeProcessor();
   if(app.autolevel.enabled&&app.autolevel.measured)
     addLog(`▶ Running with autolevel: ${app.gfile}`,'sys');
@@ -700,15 +714,17 @@ async function runFile(){
     try{await waitForOk(15000);}
     catch(ex){addLog(`Line ${i+1}: ${ex.message} — stopping`,'err');app.stopSend=true;break;}
     app.progress=Math.round(((i+1)/app.glines.length)*100);
-    if(i%8===0) render();
+    if(i%8===0){ render(); broadcastJob(true); }
   }
   app.sending=false; app.okQueue=[];
+  broadcastJob(false);
   if(!app.stopSend){addLog('✓ Complete','sys');notify('✓ Job complete!');}
   render();
 }
 
 function stopFile(){
   app.stopSend=true; app.sending=false; app.okQueue=[];
+  broadcastJob(false);
   write('\x18',true); write('!',true);
   addLog('⚠ Stop + Reset','err'); render();
 }

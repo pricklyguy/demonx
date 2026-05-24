@@ -35,6 +35,7 @@ const serial = {
   lineBuf:   '',
   poll:      null,
   lastStatus: { state:'Disconnected', mpos:[0,0,0], wpos:[0,0,0], feed:0, rpm:0, updatedAt:null },
+  job: { file:null, totalLines:0, sentLines:0, progress:0, running:false, startTime:null, elapsedSec:0 },
 };
 
 // ── WEBSOCKET CLIENT REGISTRY ────────────────────────────────────────────────
@@ -201,6 +202,12 @@ const server = http.createServer((req, res) => {
 
   // HA status endpoint — poll this from Home Assistant REST sensor
   if (pathname === '/api/status') {
+    const j = serial.job;
+    const elapsed = j.running && j.startTime ? Math.floor((Date.now() - j.startTime) / 1000) : j.elapsedSec;
+    const remaining = (j.running && j.totalLines > 0 && j.sentLines > 0)
+      ? Math.floor(elapsed / j.sentLines * (j.totalLines - j.sentLines)) : 0;
+    function toHMS(s){ const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+      return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`; }
     const payload = {
       connected:  serial.connected,
       port:       serial.portPath || null,
@@ -211,6 +218,18 @@ const server = http.createServer((req, res) => {
       rpm:        serial.lastStatus.rpm,
       clients:    clients.size,
       updatedAt:  serial.lastStatus.updatedAt,
+      job: {
+        file:          j.file,
+        totalLines:    j.totalLines,
+        sentLines:     j.sentLines,
+        remainingLines:Math.max(0, j.totalLines - j.sentLines),
+        progress:      j.progress,
+        running:       j.running,
+        elapsedSec:    elapsed,
+        remainingSec:  remaining,
+        elapsed:       toHMS(elapsed),
+        remaining:     toHMS(remaining),
+      },
     };
     res.writeHead(200, {
       'Content-Type':  'application/json',
@@ -342,6 +361,19 @@ wss.on('connection', (ws, req) => {
         } else {
           openSerial(msg.port, msg.baud || 115200);
         }
+        break;
+
+      case 'jobUpdate':
+        // Client broadcasts job state — cache for /api/status
+        serial.job = {
+          file:       msg.file || null,
+          totalLines: msg.totalLines || 0,
+          sentLines:  msg.sentLines  || 0,
+          progress:   msg.progress   || 0,
+          running:    msg.running    || false,
+          startTime:  msg.running && !serial.job.running ? Date.now() : (msg.running ? serial.job.startTime : null),
+          elapsedSec: msg.running && serial.job.startTime ? Math.floor((Date.now() - serial.job.startTime) / 1000) : serial.job.elapsedSec,
+        };
         break;
 
       case 'write':

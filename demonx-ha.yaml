@@ -1,13 +1,20 @@
-# ──────────────────────────────────────────────────────────────
-#  DemonX CNC — Home Assistant Integration
-#  Replaces the ESP32-S3 FluidNC bridge entirely.
-#  All data comes from the DemonX server over your LAN.
+###############################################################################
+# DemonX CNC — Home Assistant Package
+# File: packages/demonx.yaml
 #
-#  Replace 10.10.1.31 with your DemonX server IP.
-#  Add to configuration.yaml or a packages file.
-# ──────────────────────────────────────────────────────────────
+# Requires in configuration.yaml:
+#   homeassistant:
+#     packages:
+#       demonx: !include packages/demonx.yaml
+#
+# Replace 10.10.1.31 with your DemonX server IP.
+# All data sourced from DemonX server — no ESP32 bridge required.
+###############################################################################
 
-# ── REST SENSORS (replaces all ESP32 template sensors) ────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REST Sensors — polls /api/status every 2 seconds
+# ─────────────────────────────────────────────────────────────────────────────
 rest:
   - resource: http://10.10.1.31:8080/api/status
     scan_interval: 2
@@ -87,8 +94,38 @@ rest:
         device_class: connectivity
 
 
-# ── TEMPLATE BINARY SENSORS (derived from CNC State) ──────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Template Sensors & Binary Sensors
+# ─────────────────────────────────────────────────────────────────────────────
 template:
+  - sensor:
+      - name: "DemonX State Label"
+        unique_id: demonx_state_label
+        icon: mdi:robot-industrial
+        state: >-
+          {% set s = states('sensor.cnc_state') %}
+          {% if   s == 'Run'   %} Running
+          {% elif s == 'Jog'   %} Jogging
+          {% elif s == 'Idle'  %} Idle
+          {% elif s == 'Alarm' %} ALARM
+          {% elif s == 'Hold'  %} Feed Hold
+          {% elif s == 'Home'  %} Homing
+          {% elif s == 'Sleep' %} Sleep
+          {% else %}               Offline
+          {% endif %}
+
+      - name: "DemonX Feed Rate Display"
+        unique_id: demonx_feed_display
+        icon: mdi:speedometer
+        state: >-
+          {{ states('sensor.cnc_feed_rate') | int(0) }} mm/min
+
+      - name: "DemonX Spindle Display"
+        unique_id: demonx_spindle_display
+        icon: mdi:rotate-3d-variant
+        state: >-
+          {{ states('sensor.cnc_spindle_rpm') | int(0) }} RPM
+
   - binary_sensor:
       - name: "CNC Running"
         unique_id: demonx_cnc_running
@@ -116,8 +153,17 @@ template:
           {{ states('sensor.cnc_state') == 'Idle' }}
         icon: mdi:check-circle
 
+      - name: "DemonX Connected"
+        unique_id: demonx_connected
+        device_class: connectivity
+        state: >-
+          {{ states('sensor.cnc_state') not in
+             ['unknown', 'unavailable', 'none', ''] }}
 
-# ── REST COMMANDS (for button actions) ────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REST Commands — POST to DemonX server, forwarded to FluidNC
+# ─────────────────────────────────────────────────────────────────────────────
 rest_command:
   cnc_feed_hold:
     url: http://10.10.1.31:8080/api/command
@@ -150,7 +196,9 @@ rest_command:
     payload: '{"cmd":"$H\n"}'
 
 
-# ── BUTTON ENTITIES ───────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Button Entities
+# ─────────────────────────────────────────────────────────────────────────────
 button:
   - platform: template
     name: "CNC Feed Hold"
@@ -188,29 +236,320 @@ button:
       - service: rest_command.cnc_home_all
 
 
-# ──────────────────────────────────────────────────────────────
-#  Example Lovelace card
-# ──────────────────────────────────────────────────────────────
-# type: vertical-stack
-# cards:
-#   - type: glance
-#     title: DemonX CNC
-#     entities:
-#       - entity: binary_sensor.demonx_online
-#       - entity: sensor.cnc_state
-#       - entity: binary_sensor.cnc_running
-#       - entity: binary_sensor.cnc_alarm
-#   - type: glance
-#     title: Work Position
-#     entities:
-#       - entity: sensor.cnc_work_x
-#       - entity: sensor.cnc_work_y
-#       - entity: sensor.cnc_work_z
-#   - type: glance
-#     title: Controls
-#     entities:
-#       - entity: button.cnc_feed_hold
-#       - entity: button.cnc_resume
-#       - entity: button.cnc_soft_reset
-#       - entity: button.cnc_unlock
-#       - entity: button.cnc_home_all
+# ─────────────────────────────────────────────────────────────────────────────
+# Automations
+# ─────────────────────────────────────────────────────────────────────────────
+automation:
+
+  - id: demonx_run_tts
+    alias: "DemonX - Job Started TTS"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        from: "Idle"
+        to: "Run"
+    action:
+      - action: media_player.volume_set
+        target:
+          entity_id: media_player.garage_desk_sonos
+        data:
+          volume_level: 0.6
+      - action: tts.speak
+        target:
+          entity_id: tts.google_en_com
+        data:
+          media_player_entity_id: media_player.garage_desk_sonos
+          message: "DemonX is now running."
+    mode: single
+
+  - id: demonx_idle_tts
+    alias: "DemonX - Job Complete TTS"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        from: "Run"
+        to: "Idle"
+        for: "00:00:03"
+    action:
+      - action: media_player.volume_set
+        target:
+          entity_id: media_player.garage_desk_sonos
+        data:
+          volume_level: 0.6
+      - action: tts.speak
+        target:
+          entity_id: tts.google_en_com
+        data:
+          media_player_entity_id: media_player.garage_desk_sonos
+          message: "DemonX job complete. Machine is idle."
+    mode: single
+
+  - id: demonx_alarm_tts
+    alias: "DemonX - Alarm TTS"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        to: "Alarm"
+    action:
+      - action: media_player.volume_set
+        target:
+          entity_id: media_player.garage_desk_sonos
+        data:
+          volume_level: 0.9
+      - action: tts.speak
+        target:
+          entity_id: tts.google_en_com
+        data:
+          media_player_entity_id: media_player.garage_desk_sonos
+          message: "Warning. DemonX alarm condition. Check the machine immediately."
+    mode: single
+
+  - id: demonx_hold_tts
+    alias: "DemonX - Feed Hold TTS"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        to: "Hold"
+    action:
+      - action: tts.speak
+        target:
+          entity_id: tts.google_en_com
+        data:
+          media_player_entity_id: media_player.garage_desk_sonos
+          message: "DemonX feed hold engaged."
+    mode: single
+
+  - id: demonx_camera_push
+    alias: "DemonX - Push Shop Camera on Run"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        to: "Run"
+    action:
+      - action: camera.play_stream
+        target:
+          entity_id: camera.cnc_reolink
+        data:
+          media_player: media_player.dads_streaming_stick_4k_2
+          format: hls
+    mode: restart
+
+  - id: demonx_alarm_notify
+    alias: "DemonX - Alarm Persistent Notification"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        to: "Alarm"
+    action:
+      - action: persistent_notification.create
+        data:
+          title: "🔴 DemonX ALARM"
+          message: >
+            Alarm triggered at {{ now().strftime('%H:%M:%S') }}.
+            X: {{ states('sensor.cnc_x_position') }} mm |
+            Y: {{ states('sensor.cnc_y_position') }} mm |
+            Z: {{ states('sensor.cnc_z_position') }} mm
+          notification_id: demonx_alarm
+    mode: single
+
+  - id: demonx_alarm_clear_notify
+    alias: "DemonX - Clear Alarm Notification on Unlock"
+    trigger:
+      - trigger: state
+        entity_id: sensor.cnc_state
+        from: "Alarm"
+    action:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: demonx_alarm
+    mode: single
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job Tracking Sensors (file name, progress, rows, timing)
+# ─────────────────────────────────────────────────────────────────────────────
+# These are added to the same REST resource above — shown separately for clarity
+# Add these sensor entries inside the rest: block above, or use a second rest block:
+
+rest:
+  - resource: http://10.10.1.31:8080/api/status
+    scan_interval: 2
+    timeout: 3
+
+    sensor:
+      - name: "CNC Job File"
+        unique_id: demonx_job_file
+        value_template: "{{ value_json.job.file or 'None' }}"
+        icon: mdi:file-cog-outline
+
+      - name: "CNC Job Progress"
+        unique_id: demonx_job_progress
+        value_template: "{{ value_json.job.progress | int(0) }}"
+        unit_of_measurement: "%"
+        icon: mdi:progress-check
+        state_class: measurement
+
+      - name: "CNC Job Total Lines"
+        unique_id: demonx_job_total
+        value_template: "{{ value_json.job.totalLines | int(0) }}"
+        icon: mdi:format-list-numbered
+        state_class: measurement
+
+      - name: "CNC Job Sent Lines"
+        unique_id: demonx_job_sent
+        value_template: "{{ value_json.job.sentLines | int(0) }}"
+        icon: mdi:check-all
+        state_class: measurement
+
+      - name: "CNC Job Remaining Lines"
+        unique_id: demonx_job_remaining
+        value_template: "{{ value_json.job.remainingLines | int(0) }}"
+        icon: mdi:dots-horizontal
+        state_class: measurement
+
+      - name: "CNC Elapsed Time"
+        unique_id: demonx_job_elapsed
+        value_template: "{{ value_json.job.elapsed }}"
+        icon: mdi:timer-outline
+
+      - name: "CNC Remaining Time"
+        unique_id: demonx_job_remaining_time
+        value_template: "{{ value_json.job.remaining }}"
+        icon: mdi:timer-sand
+
+    binary_sensor:
+      - name: "CNC Job Running"
+        unique_id: demonx_job_running
+        value_template: "{{ value_json.job.running }}"
+        device_class: running
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dashboard Card (replaces old UGS card — paste into Lovelace as manual YAML)
+# ─────────────────────────────────────────────────────────────────────────────
+# type: custom:mod-card
+# style:
+#   .: |
+#     ha-card {
+#       {% set s = states('sensor.cnc_state') | lower %}
+#       {% if s == 'run' %}
+#         background: linear-gradient(160deg, #004d00 0%, #00cc00 100%);
+#       {% elif s == 'idle' %}
+#         background: linear-gradient(160deg, #4d4d00 0%, #cccc00 100%);
+#       {% elif s == 'alarm' %}
+#         background: linear-gradient(160deg, #660000 0%, #ff0000 100%);
+#       {% elif s in ['hold', 'paused'] %}
+#         background: linear-gradient(160deg, #664400 0%, #ff9900 100%);
+#       {% else %}
+#         background: linear-gradient(160deg, #222 0%, #555 100%);
+#       {% endif %}
+#       color: #fff;
+#       border-radius: 20px;
+#       padding: 16px;
+#     }
+# card:
+#   type: vertical-stack
+#   cards:
+#     - type: custom:mushroom-template-card
+#       primary: "🛠️ DemonX: {{ states('sensor.demonx_state_label') }}"
+#       secondary: "File: {{ states('sensor.cnc_job_file') }}"
+#       icon: >-
+#         {% set s = states('sensor.cnc_state') | lower %}
+#         {{ 'mdi:play-circle' if s == 'run'
+#            else 'mdi:pause-circle' if s == 'idle'
+#            else 'mdi:alert-circle' if s == 'alarm'
+#            else 'mdi:pause-octagon' if s in ['hold','paused']
+#            else 'mdi:help-circle' }}
+#       color: >-
+#         {% set s = states('sensor.cnc_state') | lower %}
+#         {{ 'green' if s == 'run'
+#            else 'yellow' if s == 'idle'
+#            else 'red' if s == 'alarm'
+#            else 'orange' if s in ['hold','paused']
+#            else 'grey' }}
+#       layout: horizontal
+#       fill_container: true
+#     - type: grid
+#       square: false
+#       columns: 3
+#       cards:
+#         - type: custom:mushroom-template-card
+#           primary: X
+#           secondary: "{{ states('sensor.cnc_work_x') }} mm"
+#           icon: mdi:axis-x-arrow
+#           icon_color: red
+#         - type: custom:mushroom-template-card
+#           primary: Y
+#           secondary: "{{ states('sensor.cnc_work_y') }} mm"
+#           icon: mdi:axis-y-arrow
+#           icon_color: green
+#         - type: custom:mushroom-template-card
+#           primary: Z
+#           secondary: "{{ states('sensor.cnc_work_z') }} mm"
+#           icon: mdi:axis-z-arrow
+#           icon_color: blue
+#     - type: conditional
+#       conditions:
+#         - entity: sensor.cnc_job_progress
+#           state_not: "0"
+#       card:
+#         type: gauge
+#         entity: sensor.cnc_job_progress
+#         name: Job Progress
+#         min: 0
+#         max: 100
+#         needle: true
+#         severity:
+#           green: 0
+#           yellow: 60
+#           red: 90
+#     - type: entities
+#       title: DemonX Job Stats
+#       entities:
+#         - entity: binary_sensor.demonx_online
+#           name: Online
+#         - entity: sensor.cnc_job_file
+#           name: File Name
+#         - entity: sensor.cnc_job_sent_lines
+#           name: Completed Lines
+#         - entity: sensor.cnc_job_total_lines
+#           name: Total Lines
+#         - entity: sensor.cnc_job_remaining_lines
+#           name: Remaining Lines
+#         - entity: sensor.cnc_elapsed_time
+#           name: Elapsed Time
+#         - entity: sensor.cnc_remaining_time
+#           name: Remaining Time
+#     - type: horizontal-stack
+#       cards:
+#         - type: button
+#           name: Unlock
+#           icon: mdi:lock-open-variant-outline
+#           tap_action:
+#             action: perform-action
+#             perform_action: button.cnc_unlock
+#         - type: button
+#           name: Home
+#           icon: mdi:home-export-outline
+#           tap_action:
+#             action: perform-action
+#             perform_action: button.cnc_home_all
+#         - type: button
+#           name: Pause
+#           icon: mdi:pause-circle
+#           tap_action:
+#             action: perform-action
+#             perform_action: button.cnc_feed_hold
+#         - type: button
+#           name: Resume
+#           icon: mdi:play-circle
+#           tap_action:
+#             action: perform-action
+#             perform_action: button.cnc_resume
+#         - type: button
+#           name: 🛑 E-Stop
+#           icon: mdi:alert-octagon
+#           icon_color: red
+#           tap_action:
+#             action: perform-action
+#             perform_action: button.cnc_soft_reset
