@@ -1,48 +1,79 @@
 # ──────────────────────────────────────────────────────────────
 #  DemonX CNC — Home Assistant Integration
-#  Add to configuration.yaml (or a package file)
-#  Replace 10.10.1.31 with your DemonX server IP
+#  Replaces the ESP32-S3 FluidNC bridge entirely.
+#  All data comes from the DemonX server over your LAN.
+#
+#  Replace 10.10.1.31 with your DemonX server IP.
+#  Add to configuration.yaml or a packages file.
 # ──────────────────────────────────────────────────────────────
 
-# REST sensor — polls /api/status every 10 seconds
+# ── REST SENSORS (replaces all ESP32 template sensors) ────────
 rest:
   - resource: http://10.10.1.31:8080/api/status
-    scan_interval: 10
-    sensor:
-      - name: "DemonX State"
-        unique_id: demonx_state
-        value_template: "{{ value_json.state }}"
-        icon: mdi:router-wireless
+    scan_interval: 2
+    timeout: 3
 
-      - name: "DemonX Feed Rate"
-        unique_id: demonx_feed
+    sensor:
+      - name: "CNC State"
+        unique_id: demonx_cnc_state
+        value_template: "{{ value_json.state }}"
+        icon: mdi:robot-industrial
+
+      - name: "CNC Work X"
+        unique_id: demonx_cnc_wx
+        value_template: "{{ value_json.wpos[0] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:alpha-x-circle-outline
+        state_class: measurement
+
+      - name: "CNC Work Y"
+        unique_id: demonx_cnc_wy
+        value_template: "{{ value_json.wpos[1] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:alpha-y-circle-outline
+        state_class: measurement
+
+      - name: "CNC Work Z"
+        unique_id: demonx_cnc_wz
+        value_template: "{{ value_json.wpos[2] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:alpha-z-circle-outline
+        state_class: measurement
+
+      - name: "CNC X Position"
+        unique_id: demonx_cnc_x
+        value_template: "{{ value_json.mpos[0] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:alpha-x-box-outline
+        state_class: measurement
+
+      - name: "CNC Y Position"
+        unique_id: demonx_cnc_y
+        value_template: "{{ value_json.mpos[1] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:alpha-y-box-outline
+        state_class: measurement
+
+      - name: "CNC Z Position"
+        unique_id: demonx_cnc_z
+        value_template: "{{ value_json.mpos[2] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:alpha-z-box-outline
+        state_class: measurement
+
+      - name: "CNC Feed Rate"
+        unique_id: demonx_cnc_feed
         value_template: "{{ value_json.feed }}"
         unit_of_measurement: "mm/min"
         icon: mdi:speedometer
+        state_class: measurement
 
-      - name: "DemonX Spindle RPM"
-        unique_id: demonx_rpm
+      - name: "CNC Spindle RPM"
+        unique_id: demonx_cnc_spindle
         value_template: "{{ value_json.rpm }}"
         unit_of_measurement: "RPM"
-        icon: mdi:rotate-right
-
-      - name: "DemonX Work X"
-        unique_id: demonx_wx
-        value_template: "{{ value_json.wpos[0] | round(3) }}"
-        unit_of_measurement: "mm"
-        icon: mdi:axis-x-arrow
-
-      - name: "DemonX Work Y"
-        unique_id: demonx_wy
-        value_template: "{{ value_json.wpos[1] | round(3) }}"
-        unit_of_measurement: "mm"
-        icon: mdi:axis-y-arrow
-
-      - name: "DemonX Work Z"
-        unique_id: demonx_wz
-        value_template: "{{ value_json.wpos[2] | round(3) }}"
-        unit_of_measurement: "mm"
-        icon: mdi:axis-z-arrow
+        icon: mdi:rotate-3d-variant
+        state_class: measurement
 
       - name: "DemonX Viewers"
         unique_id: demonx_viewers
@@ -55,22 +86,131 @@ rest:
         value_template: "{{ value_json.connected }}"
         device_class: connectivity
 
-      - name: "DemonX Running"
-        unique_id: demonx_running
-        value_template: "{{ value_json.state == 'Run' }}"
+
+# ── TEMPLATE BINARY SENSORS (derived from CNC State) ──────────
+template:
+  - binary_sensor:
+      - name: "CNC Running"
+        unique_id: demonx_cnc_running
+        state: >
+          {{ states('sensor.cnc_state') in ['Run', 'Jog'] }}
+        icon: mdi:play-circle
         device_class: running
 
+      - name: "CNC Alarm"
+        unique_id: demonx_cnc_alarm
+        state: >
+          {{ states('sensor.cnc_state') == 'Alarm' }}
+        icon: mdi:alert-circle
+        device_class: problem
+
+      - name: "CNC Homing"
+        unique_id: demonx_cnc_homing
+        state: >
+          {{ states('sensor.cnc_state') == 'Home' }}
+        icon: mdi:home-search
+
+      - name: "CNC Idle"
+        unique_id: demonx_cnc_idle
+        state: >
+          {{ states('sensor.cnc_state') == 'Idle' }}
+        icon: mdi:check-circle
+
+
+# ── REST COMMANDS (for button actions) ────────────────────────
+rest_command:
+  cnc_feed_hold:
+    url: http://10.10.1.31:8080/api/command
+    method: POST
+    content_type: "application/json"
+    payload: '{"cmd":"!"}'
+
+  cnc_resume:
+    url: http://10.10.1.31:8080/api/command
+    method: POST
+    content_type: "application/json"
+    payload: '{"cmd":"~"}'
+
+  cnc_soft_reset:
+    url: http://10.10.1.31:8080/api/command
+    method: POST
+    content_type: "application/json"
+    payload: '{"cmd":"\u0018"}'
+
+  cnc_unlock:
+    url: http://10.10.1.31:8080/api/command
+    method: POST
+    content_type: "application/json"
+    payload: '{"cmd":"$X\n"}'
+
+  cnc_home_all:
+    url: http://10.10.1.31:8080/api/command
+    method: POST
+    content_type: "application/json"
+    payload: '{"cmd":"$H\n"}'
+
+
+# ── BUTTON ENTITIES ───────────────────────────────────────────
+button:
+  - platform: template
+    name: "CNC Feed Hold"
+    unique_id: demonx_btn_hold
+    icon: mdi:pause-circle
+    on_press:
+      - service: rest_command.cnc_feed_hold
+
+  - platform: template
+    name: "CNC Resume"
+    unique_id: demonx_btn_resume
+    icon: mdi:play-circle
+    on_press:
+      - service: rest_command.cnc_resume
+
+  - platform: template
+    name: "CNC Soft Reset"
+    unique_id: demonx_btn_reset
+    icon: mdi:restart
+    on_press:
+      - service: rest_command.cnc_soft_reset
+
+  - platform: template
+    name: "CNC Unlock"
+    unique_id: demonx_btn_unlock
+    icon: mdi:lock-open-variant
+    on_press:
+      - service: rest_command.cnc_unlock
+
+  - platform: template
+    name: "CNC Home All"
+    unique_id: demonx_btn_home
+    icon: mdi:home-export-outline
+    on_press:
+      - service: rest_command.cnc_home_all
+
+
 # ──────────────────────────────────────────────────────────────
-#  Example Lovelace card (add to your dashboard YAML)
+#  Example Lovelace card
 # ──────────────────────────────────────────────────────────────
-# type: entities
-# title: DemonX CNC
-# entities:
-#   - entity: binary_sensor.demonx_online
-#   - entity: sensor.demonx_state
-#   - entity: sensor.demonx_feed_rate
-#   - entity: sensor.demonx_spindle_rpm
-#   - entity: sensor.demonx_work_x
-#   - entity: sensor.demonx_work_y
-#   - entity: sensor.demonx_work_z
-#   - entity: sensor.demonx_viewers
+# type: vertical-stack
+# cards:
+#   - type: glance
+#     title: DemonX CNC
+#     entities:
+#       - entity: binary_sensor.demonx_online
+#       - entity: sensor.cnc_state
+#       - entity: binary_sensor.cnc_running
+#       - entity: binary_sensor.cnc_alarm
+#   - type: glance
+#     title: Work Position
+#     entities:
+#       - entity: sensor.cnc_work_x
+#       - entity: sensor.cnc_work_y
+#       - entity: sensor.cnc_work_z
+#   - type: glance
+#     title: Controls
+#     entities:
+#       - entity: button.cnc_feed_hold
+#       - entity: button.cnc_resume
+#       - entity: button.cnc_soft_reset
+#       - entity: button.cnc_unlock
+#       - entity: button.cnc_home_all

@@ -168,6 +168,37 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // HA command endpoint — POST /api/command  body: {"cmd":"!"}
+  // Accepts: ! (hold)  ~ (resume)  \x18 (reset)  $X\n (unlock)  $H\n (home)
+  if (pathname === '/api/command' && req.method === 'POST') {
+    const ALLOWED = ['!', '~', '\x18', '$X\n', '$H\n', '$HX\n', '$HY\n', '$HZ\n'];
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { cmd } = JSON.parse(body);
+        if (!ALLOWED.includes(cmd)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Command not allowed' }));
+          return;
+        }
+        if (!serial.connected) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Serial not connected' }));
+          return;
+        }
+        serialWrite(cmd);
+        console.log(`[API] Command from HA: ${JSON.stringify(cmd)}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   // HA status endpoint — poll this from Home Assistant REST sensor
   if (pathname === '/api/status') {
     const payload = {
