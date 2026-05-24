@@ -1,0 +1,2513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DemonX CNC Controller</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+html,body { width:100%; height:100%; overflow:hidden;
+  font-family:'Fira Code','Cascadia Code','JetBrains Mono','Courier New',monospace;
+  color:#c8d4e4; user-select:none; }
+button { font-family:inherit; transition:filter .1s; }
+button:hover:not(:disabled) { filter:brightness(1.2); }
+input,select { font-family:inherit; color-scheme:dark; }
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:#334155; border-radius:3px; }
+/* PGC background — applied to dark mode; light mode overrides below */
+body.pgc-dark {
+  background:
+    radial-gradient(1800px 900px at 15% 0%, rgba(52,209,198,0.13), transparent 75%),
+    radial-gradient(1200px 700px at 90% 15%, rgba(52,209,198,0.08), transparent 70%),
+    radial-gradient(1000px 400px at 50% 100%, rgba(52,209,198,0.05), transparent 65%),
+    linear-gradient(135deg, #070a0f, #0b121a) !important;
+}
+body.pgc-light {
+  background:
+    radial-gradient(1800px 900px at 15% 0%, rgba(52,209,198,0.08), transparent 75%),
+    radial-gradient(1200px 700px at 90% 15%, rgba(52,209,198,0.05), transparent 70%),
+    linear-gradient(135deg, #e8edf4, #d8e6f0) !important;
+}
+</style>
+</head>
+<body>
+<div id="root" style="width:100vw;height:100vh;position:relative;overflow:hidden;"></div>
+<script>
+'use strict';
+
+// ── PGC BRANDING ───────────────────────────────────────────────────────────
+const PGC_LOGO_URL='https://pricklyguy.github.io/pgc-esphome-ui/pgc_logo.png';
+
+// ── THEME ──────────────────────────────────────────────────────────────────
+const THEMES = {
+  dark:  { bg:'#0c0c18', surface:'#111122', border:'#1e2a3a', text:'#c8d4e4', muted:'#4a5a6a', topbar:'#07070e' },
+  light: { bg:'#e8edf4', surface:'#ffffff', border:'#c0cdd8', text:'#1a2535', muted:'#7a8a9a', topbar:'#d0dae8' },
+};
+let currentTheme = localStorage.getItem('demonx_theme')||'dark';
+let C = {...THEMES[currentTheme]};
+function applyTheme(t){
+  currentTheme=t;
+  Object.assign(C,THEMES[t]);
+  localStorage.setItem('demonx_theme',t);
+  document.body.classList.toggle('pgc-dark', t==='dark');
+  document.body.classList.toggle('pgc-light', t==='light');
+}
+
+// ── CONSTANTS ──────────────────────────────────────────────────────────────
+// C is set dynamically by applyTheme() below
+const STATE_COLOR = { Idle:'#22c55e',Run:'#3b82f6',Jog:'#06b6d4',
+  'Hold:0':'#f59e0b','Hold:1':'#f59e0b',Alarm:'#ef4444',Door:'#ef4444',
+  Check:'#a855f7',Home:'#06b6d4',Sleep:'#334155',Disconnected:'#334155' };
+const LS = { panels:'demonx_panels_v6', settings:'demonx_settings_v3', al:'demonx_al_v2', cam:'demonx_cam_v1' };
+
+// ── DEFAULTS ───────────────────────────────────────────────────────────────
+const DEF_SETTINGS = {
+  // From macros
+  plateZ_zonly:  25.05,  // PROBE_BLOCK_Z for Z-only probe
+  plateZ_xyz:    22,     // PROBE_BLOCK_Z for 3-axis probe
+  plateX:        7,      // PROBE_BLOCK_X
+  plateY:        7,      // PROBE_BLOCK_Y
+  probeFeedFast: 75,     // first-pass probe feed (F75 from macro)
+  probeFeedFine: 45,     // second-pass fine probe (F45 from macro)
+  probeMaxZ:     25,     // max Z probe travel
+  probeMaxXY:    25,     // max XY probe travel
+  endmill:       6.35,   // 1/4" default
+  safeZ:         5,
+  pcbHomeX:      0,      // Machine X for PCB fixture position
+  pcbHomeY:      0,      // Machine Y for PCB fixture position
+  pcbHomeEnabled:false,  // show PCB Home button once configured
+};
+
+const DEF_PANELS = [
+  { id:'conn',     title:'⚡  CONNECTION',  accent:'#22c55e', x:12,  y:48,  w:240, h:null },
+  { id:'status',   title:'📊  STATUS',      accent:'#3b82f6', x:264, y:48,  w:305, h:null },
+  { id:'jog',      title:'🕹  JOG',         accent:'#f59e0b', x:581, y:48,  w:250, h:null },
+  { id:'file',     title:'📁  FILE',        accent:'#a855f7', x:12,  y:312, w:240, h:null },
+  { id:'probe',    title:'🔬  PROBE',       accent:'#ef4444', x:264, y:350, w:320, h:null },
+  { id:'autolevel',title:'⬛  AUTOLEVEL',   accent:'#06b6d4', x:581, y:310, w:290, h:null },
+  { id:'spindle',  title:'🌀  SPINDLE',     accent:'#f97316', x:581, y:545, w:260, h:null },
+  { id:'console',  title:'>_  CONSOLE',     accent:'#64748b', x:12,  y:530, w:540, h:190 },
+  { id:'visualizer',title:'🗺  VISUALIZER', accent:'#818cf8', x:845, y:48,  w:420, h:480 },
+  { id:'config',    title:'⚙  CONFIG',      accent:'#94a3b8', x:845, y:540, w:420, h:320 },
+  { id:'ipcam',    title:'📷  IP CAM',      accent:'#f472b6', x:845, y:540, w:420, h:280 },
+];
+
+// ── APP STATE ──────────────────────────────────────────────────────────────
+const app = {
+  connected:false, baud:115200,
+  grbl:{ state:'Disconnected', MPos:[0,0,0], WCO:[0,0,0], FS:[0,0] },
+  log:[
+    {k:'sys',m:'DemonX  ·  Web Serial CNC Controller'},
+    {k:'sys',m:''},
+    {k:'sys',m:('serial' in navigator)
+      ? '✓ Web Serial available — click CONNECT USB'
+      : '✗ Open in Chrome or Edge (Web Serial required)'},
+  ],
+  cmdInput:'', jogStep:1, jogStepZ:1, jogFeed:4000, spindleSpeed:10000, homing:false,
+  gfile:null, glines:[], progress:0, sending:false, stopSend:false, jobTimeEst:null,
+  notification:null, notifyTimer:null,
+  vizPaths:[], vizBounds:{minX:0,maxX:100,minY:0,maxY:100},
+  vizZoom:1, vizPanX:0, vizPanY:0, vizFitted:false,
+  camUrl:'', camError:false,
+  settings:loadPref(LS.settings, DEF_SETTINGS),
+  panels:restorePanels(DEF_PANELS),
+  autolevel:{
+    enabled:false, measured:false, probing:false, stopProbing:false,
+    gridCols:5, gridRows:5,
+    minX:0, maxX:100, minY:0, maxY:100,
+    scanOffsetX:0, scanOffsetY:0,
+    probeDepth:-3, probeFeed:50, safeZAL:2,
+    grid:[], currentPt:0, totalPts:0,
+  },
+  cfgSettings:{}, cfgLoading:false, cfgEdits:{},
+  okQueue:[], prbResolve:null,
+  drag:null, dragOff:{x:0,y:0},
+  resize:null, resizeStart:{x:0,y:0,w:0,h:0},
+  transport:'detecting',
+  wsConn:null, availablePorts:[], selectedPort:'', wsClientCount:1,
+  camRtspUrl:'', camRtspUser:'', camRtspPass:'',
+  camProxyUrl:'', camError:false,
+};
+// Restore cam settings
+(()=>{ try{ const s=JSON.parse(localStorage.getItem(LS.cam)||'{}');
+  if(s.url) app.camRtspUrl=s.url;
+  if(s.user) app.camRtspUser=s.user;
+  if(s.pass) app.camRtspPass=s.pass;
+  if(s.path) app._reolinkPath=s.path;
+}catch(_){} })();
+
+// ── TRANSPORT DETECTION ────────────────────────────────────────────────────
+(async function detectTransport(){
+  try {
+    const r=await fetch('/api/ports',{signal:AbortSignal.timeout(700)});
+    if(r.ok){
+      app.transport='websocket';
+      const ports=await r.json();
+      app.availablePorts=ports;
+      // Auto-select last used port
+      const lastPort=localStorage.getItem('demonx_lastport');
+      const match=ports.find(p=>p.path===lastPort);
+      app.selectedPort=(match||ports[0]||{}).path||'';
+      addLog('Server mode  ·  WebSocket transport','sys');
+      addLog(`${ports.length} serial port(s) available`,'sys');
+      render();
+      // Auto-connect if we have a last port and not already connected
+      if(app.selectedPort&&!app.connected){
+        addLog(`Auto-connecting to ${app.selectedPort}…`,'sys');
+        setTimeout(()=>connect(),400);
+      }
+      return;
+    }
+  } catch(_){}
+  app.transport=('serial' in navigator)?'webserial':'none';
+  if(app.transport==='webserial') addLog('Local mode  ·  Web Serial transport','sys');
+  else addLog('No transport  ·  open in Chrome or run server.js','err');
+  render();
+})();
+loadAL();
+
+// ── STORAGE ────────────────────────────────────────────────────────────────
+function loadPref(key, def) {
+  try { return {...def, ...JSON.parse(localStorage.getItem(key)||'{}')}; }
+  catch(_) { return {...def}; }
+}
+function savePref(key, obj) { localStorage.setItem(key, JSON.stringify(obj)); }
+
+function restorePanels(defs) {
+  const saved = loadPref(LS.panels, {});
+  return defs.map(d => {
+    const s = saved[d.id];
+    return s ? {...d, x:s.x, y:s.y, w:s.w, h:s.h} : {...d};
+  });
+}
+function savePanels() {
+  const obj = {};
+  app.panels.forEach(p => { obj[p.id]={x:p.x,y:p.y,w:p.w,h:p.h}; });
+  savePref(LS.panels, obj);
+}
+
+function saveSettings() { savePref(LS.settings, app.settings); }
+
+function saveAL() {
+  savePref(LS.al, {
+    enabled:app.autolevel.enabled, measured:app.autolevel.measured,
+    gridCols:app.autolevel.gridCols, gridRows:app.autolevel.gridRows,
+    minX:app.autolevel.minX, maxX:app.autolevel.maxX,
+    minY:app.autolevel.minY, maxY:app.autolevel.maxY,
+    scanOffsetX:app.autolevel.scanOffsetX, scanOffsetY:app.autolevel.scanOffsetY,
+    grid:app.autolevel.grid,
+  });
+}
+function loadAL() {
+  const s = loadPref(LS.al, {});
+  if(s.grid && s.grid.length) Object.assign(app.autolevel, s);
+}
+
+// ── DOM HELPER ─────────────────────────────────────────────────────────────
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs||{})) {
+    if(k==='style') Object.assign(e.style, v);
+    else if(k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
+    else if(k==='disabled') { if(v) e.disabled=true; }  // only set if truly disabled
+    else e.setAttribute(k,v);
+  }
+  for(const k of kids.flat()) {
+    if(k==null) continue;
+    e.appendChild(typeof k==='string'?document.createTextNode(k):k);
+  }
+  return e;
+}
+
+// ── COMPONENTS ─────────────────────────────────────────────────────────────
+function mkBtn(label, onClick, color='#3b82f6', opts={}) {
+  const {small,disabled,full} = opts;
+  return h('button',{
+    disabled:!!disabled,
+    style:{background:disabled?'transparent':`${color}15`,
+      border:`1px solid ${disabled?C.border:color+'40'}`,
+      color:disabled?C.muted:color,
+      borderRadius:'5px',padding:small?'4px 10px':'7px 14px',
+      fontSize:small?'11px':'12px',fontWeight:'700',
+      cursor:disabled?'not-allowed':'pointer',
+      letterSpacing:'0.05em',width:full?'100%':undefined},
+    onClick:disabled?null:e=>{e.stopPropagation();onClick();},
+  },label);
+}
+
+function mkNum(val, onChange, width='58px', step='0.01') {
+  const stepVal = parseFloat(step) || 0.01;
+  // Use 0.5 for whole-number fields, stepVal for decimal fields
+  const bigStep = stepVal >= 1 ? 1 : 0.5;
+
+  const wrap = h('div',{style:{display:'flex',alignItems:'center',gap:'0',
+    border:`1px solid ${C.border}`,borderRadius:'5px',overflow:'hidden',flexShrink:'0'}});
+
+  const btnStyle = (side) => ({
+    background:C.bg, color:C.muted, border:'none',
+    borderRight: side==='left' ? `1px solid ${C.border}` : 'none',
+    borderLeft:  side==='right'? `1px solid ${C.border}` : 'none',
+    padding:'4px 7px', fontSize:'13px', cursor:'pointer',
+    fontFamily:'inherit', lineHeight:'1', flexShrink:'0',
+    minWidth:'26px', textAlign:'center',
+  });
+
+  const inp = h('input',{type:'number', value:val, step:stepVal,
+    style:{background:C.bg, color:C.text, border:'none', outline:'none',
+      padding:'4px 4px', fontSize:'11px', width, textAlign:'center',
+      fontFamily:'inherit',
+      // Hide native spinners
+      MozAppearance:'textfield'},
+    onChange: e => onChange(parseFloat(e.target.value)||0)});
+  // Chrome/Safari spinner hide via CSS class added below
+  inp.style.cssText += ';-webkit-appearance:none;-moz-appearance:textfield;';
+
+  const minus = h('button',{style:btnStyle('left')},  '−');
+  const plus  = h('button',{style:btnStyle('right')}, '+');
+
+  function step_(dir){
+    const cur = parseFloat(inp.value)||0;
+    const next = parseFloat((cur + dir*bigStep).toFixed(6));
+    inp.value = next;
+    onChange(next);
+  }
+
+  // Tap
+  minus.addEventListener('click', ()=>step_(-1));
+  plus.addEventListener('click',  ()=>step_(1));
+
+  // Hold-to-repeat
+  let holdTimer, holdInterval;
+  function startHold(dir){
+    holdTimer = setTimeout(()=>{
+      holdInterval = setInterval(()=>step_(dir), 80);
+    }, 400);
+  }
+  function endHold(){
+    clearTimeout(holdTimer); clearInterval(holdInterval);
+  }
+  [minus,plus].forEach((btn,i)=>{
+    const dir = i===0 ? -1 : 1;
+    btn.addEventListener('mousedown', ()=>startHold(dir));
+    btn.addEventListener('touchstart', e=>{e.preventDefault();step_(dir);startHold(dir);},{passive:false});
+    ['mouseup','mouseleave','touchend','touchcancel'].forEach(ev=>btn.addEventListener(ev,endHold));
+  });
+
+  wrap.appendChild(minus);
+  wrap.appendChild(inp);
+  wrap.appendChild(plus);
+  return wrap;
+}
+
+function mkRow(label, widget, unit='') {
+  const r=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',marginBottom:'5px'}});
+  r.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,flex:'1',minWidth:'0'}},label));
+  r.appendChild(widget);
+  if(unit) r.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},unit));
+  return r;
+}
+
+function coordRow(label, vals, accent, ids) {
+  const r=h('div',{style:{display:'flex',gap:'6px',alignItems:'center',marginBottom:'8px'}});
+  r.appendChild(h('span',{style:{fontSize:'10px',fontWeight:'700',color:C.muted,width:'44px',flexShrink:'0'}},label));
+  ['X','Y','Z'].forEach((a,i)=>{
+    const c=h('div',{style:{flex:'1',background:C.bg,borderRadius:'5px',padding:'4px 6px',textAlign:'center'}});
+    c.appendChild(h('div',{style:{fontSize:'9px',color:C.muted,marginBottom:'1px'}},a));
+    const val=h('div',{style:{fontSize:'14px',fontWeight:'700',color:accent,fontVariantNumeric:'tabular-nums'}},
+      (vals[i]||0).toFixed(3));
+    if(ids) val.id=ids[i];
+    c.appendChild(val);
+    r.appendChild(c);
+  });
+  return r;
+}
+
+function sep() { return h('div',{style:{height:'1px',background:C.border,margin:'8px 0'}}); }
+
+// ── NOTIFICATIONS ──────────────────────────────────────────────────────────
+function addLog(m,k='rx') { app.log=[...app.log.slice(-500),{k,m}]; }
+function notify(msg,color='#22c55e') {
+  clearTimeout(app.notifyTimer);
+  app.notification={msg,color};
+  app.notifyTimer=setTimeout(()=>{app.notification=null;render();},5000);
+  render();
+}
+
+// ── SERIAL I/O (transport-aware) ────────────────────────────────────────────
+async function write(data,noNl=false){
+  const bytes=noNl?data:data+'\n';
+  if(app.transport==='webserial'&&app.writer){
+    await app.writer.write(new TextEncoder().encode(bytes));
+  } else if(app.transport==='websocket'&&app.wsConn?.readyState===1){
+    app.wsConn.send(JSON.stringify({cmd:'write',data:bytes}));
+  }
+}
+
+// ── PIN / SWITCH MONITORING ──────────────────────────────────────────────────
+const PIN_NAMES = { X:'X Limit', Y:'Y Limit', Z:'Z Limit', A:'A Limit', P:'Probe', D:'Door', R:'Reset', S:'Feed Hold', F:'Cycle Start' };
+let pinPopupTimer=null;
+
+function checkPinChanges(prev, curr){
+  if(!curr&&!prev) return;
+  // Auto-dismiss limit popups when pins clear during homing
+  if(prev&&!curr&&app.homing){
+    const existing=document.getElementById('pin-popup');
+    if(existing) existing.remove();
+    return;
+  }
+  if(!curr||curr===prev) return;
+  const newPins=[...curr].filter(c=>!prev.includes(c));
+  if(!newPins.length) return;
+  const names=newPins.map(c=>PIN_NAMES[c]||c).join(', ');
+  showPinPopup(names, newPins.includes('P'), app.homing);
+}
+
+function showPinPopup(names, isProbe, isHoming=false){
+  // Clear any existing pin popup
+  clearTimeout(pinPopupTimer);
+  const existing=document.getElementById('pin-popup');
+  if(existing) existing.remove();
+
+  const popup=document.createElement('div');
+  popup.id='pin-popup';
+  // Color logic: probe=green, homing limit=teal, unexpected limit=red
+  const color = isProbe ? '#22c55e' : isHoming ? '#06b6d4' : '#ef4444';
+  const bgColor = isProbe ? 'rgba(15,30,15,0.97)' : isHoming ? 'rgba(5,25,35,0.97)' : 'rgba(35,8,8,0.97)';
+  const icon = isProbe ? '🔵' : isHoming ? '🏠' : '🔴';
+  const title = isProbe ? 'PROBE TRIGGERED' : isHoming ? 'HOMING — LIMIT HIT' : 'SWITCH TRIGGERED';
+  popup.style.cssText=`
+    position:fixed; top:60px; left:50%; transform:translateX(-50%);
+    z-index:99999; min-width:280px; max-width:400px;
+    background:${bgColor};
+    border:2px solid ${color};
+    border-radius:10px; padding:14px 20px;
+    box-shadow:0 0 40px ${color}66;
+    font-family:inherit; text-align:center;
+    animation:pinpopup 0.15s ease-out;
+  `;
+  popup.innerHTML=`
+    <div style="font-size:22px;margin-bottom:4px">${icon}</div>
+    <div style="font-size:13px;font-weight:700;color:${color};letter-spacing:0.08em;margin-bottom:4px">
+      ${title}
+    </div>
+    <div style="font-size:12px;color:#c8d4e4;opacity:0.9">${names}</div>
+    <div style="font-size:10px;color:#64748b;margin-top:6px">${isHoming?'Auto-dismisses when clear':'Click to dismiss'}</div>
+  `;
+  popup.addEventListener('click',()=>popup.remove());
+
+  // Add CSS animation if not already there
+  if(!document.getElementById('pin-popup-style')){
+    const st=document.createElement('style');
+    st.id='pin-popup-style';
+    st.textContent=`@keyframes pinpopup{from{opacity:0;transform:translateX(-50%) scale(0.9)}to{opacity:1;transform:translateX(-50%) scale(1)}}`;
+    document.head.appendChild(st);
+  }
+  document.body.appendChild(popup);
+  // Auto-dismiss: probes after 8s, homing popups after 4s, limit errors stay
+  if(isProbe) pinPopupTimer=setTimeout(()=>popup.remove(), 8000);
+  else if(isHoming) pinPopupTimer=setTimeout(()=>popup.remove(), 4000);
+}
+
+// ── PROBE WORKFLOW HELPERS ───────────────────────────────────────────────────
+function waitForOk(ms=12000) {
+  return new Promise((res,rej)=>{
+    const t=setTimeout(()=>{
+      const i=app.okQueue.indexOf(cb); if(i>=0) app.okQueue.splice(i,1);
+      rej(new Error('ok timeout'));
+    },ms);
+    const cb=()=>{clearTimeout(t);res();};
+    app.okQueue.push(cb);
+  });
+}
+function releaseOk() { if(app.okQueue.length>0) app.okQueue.shift()(); }
+
+// ── PRB CAPTURE ────────────────────────────────────────────────────────────
+function parsePRB(line) {
+  const m=line.match(/\[PRB:([^:]+):([01])\]/);
+  if(!m) return null;
+  const [x,y,z]=m[1].split(',').map(Number);
+  return {x,y,z,ok:m[2]==='1'};
+}
+function waitForPRB(ms=20000) {
+  return new Promise((res,rej)=>{
+    const t=setTimeout(()=>{app.prbResolve=null;rej(new Error('PRB timeout'));},ms);
+    app.prbResolve=(prb)=>{clearTimeout(t);res(prb);};
+  });
+}
+
+// ── GRBL STATUS ─────────────────────────────────────────────────────────────
+function parseStatus(raw) {
+  if(!raw.startsWith('<')) return null;
+  const parts=raw.slice(1,raw.indexOf('>')).split('|');
+  const out={state:parts[0]};
+  for(let i=1;i<parts.length;i++){
+    const ci=parts[i].indexOf(':'); if(ci<0) continue;
+    const key=parts[i].slice(0,ci);
+    const val=parts[i].slice(ci+1);
+    // Pn is a string of active pin chars e.g. "XYP", not numbers
+    if(key==='Pn') out.Pn=val;
+    else out[key]=val.split(',').map(Number);
+  }
+  return out;
+}
+
+// ── CONNECT / DISCONNECT ────────────────────────────────────────────────────
+async function connect() {
+  if(app.transport==='websocket') return connectWS();
+  if(app.transport==='webserial') return connectSerial();
+  addLog('No transport available','err'); render();
+}
+
+async function connectWS(){
+  if(app.wsConn&&app.wsConn.readyState<2) return; // already open or connecting
+  const wsUrl=`ws://${location.host}/ws/serial`;
+  addLog(`Connecting WS → ${wsUrl}`,'sys');
+  const ws=new WebSocket(wsUrl);
+  app.wsConn=ws;
+  ws.onopen=()=>{
+    // Always send connect — server will confirm if already open, or open if not
+    // Server guards against tearing down an existing connection for same port/baud
+    if(app.selectedPort){
+      ws.send(JSON.stringify({cmd:'connect',port:app.selectedPort,baud:app.baud}));
+    } else {
+      // No port selected yet — just request port list, wait for user to connect
+      ws.send(JSON.stringify({cmd:'list'}));
+    }
+  };
+  ws.onmessage=e=>{
+    let msg; try{msg=JSON.parse(e.data);}catch(_){return;}
+    if(msg.type==='connected'){
+      app.connected=true; app.okQueue=[];
+      addLog(`Connected to ${msg.port} @ ${app.baud} baud`,'sys');
+      localStorage.setItem('demonx_lastport', msg.port);
+      // Server handles ? polling — no client-side poll needed in WS mode
+      render();
+      setTimeout(()=>write('$I'),600);
+    } else if(msg.type==='data'){
+      handleLine(msg.line);
+    } else if(msg.type==='disconnected'){
+      clearInterval(app.poll); app.okQueue=[]; app.prbResolve=null;
+      app.connected=false; app.grbl.state='Disconnected';
+      addLog('Disconnected','sys'); render();
+    } else if(msg.type==='error'){
+      addLog('WS error: '+msg.msg,'err'); render();
+    } else if(msg.type==='ports'){
+      app.availablePorts=msg.ports;
+      if(msg.ports.length&&!app.selectedPort) app.selectedPort=msg.ports[0].path;
+      render();
+    } else if(msg.type==='clients'){
+      app.wsClientCount=msg.count; render();
+    }
+  };
+  ws.onclose=()=>{
+    clearInterval(app.poll); app.okQueue=[]; app.prbResolve=null;
+    app.connected=false; app.grbl.state='Disconnected';
+    addLog('Connection to server lost — serial may still be running','sys'); render();
+  };
+  ws.onerror=()=>{ addLog('WS connection error','err'); render(); };
+}
+
+async function connectSerial() {
+  if(!('serial' in navigator)){addLog('Web Serial unavailable','err');render();return;}
+  try {
+    const port=await navigator.serial.requestPort();
+    await port.open({baudRate:app.baud});
+    app.port=port; app.writer=port.writable.getWriter();
+    app.connected=true; app.okQueue=[];
+    addLog(`Connected @ ${app.baud} baud`,'sys'); render();
+    app.poll=setInterval(()=>{if(app.writer) write('?',true);},250);
+    (async()=>{
+      const dec=new TextDecoder(); let buf='';
+      try {
+        const reader=port.readable.getReader();
+        while(true){
+          const {value,done}=await reader.read(); if(done) break;
+          buf+=dec.decode(value,{stream:true});
+          let nl;
+          while((nl=buf.indexOf('\n'))!==-1){
+            const line=buf.slice(0,nl).trimEnd(); buf=buf.slice(nl+1);
+            if(line) handleLine(line);
+          }
+        }
+      } catch(e){if(e.name!=='AbortError'){addLog('Read error: '+e.message,'err');render();}}
+      clearInterval(app.poll); app.okQueue=[]; app.prbResolve=null;
+      app.connected=false; app.grbl.state='Disconnected';
+      app.writer=null; app.port=null;
+      addLog('Disconnected','sys'); render();
+    })();
+    setTimeout(()=>write('$I'),600);
+  } catch(e){if(e.name!=='NotFoundError'){addLog('Connect error: '+e.message,'err');render();}}
+}
+
+async function disconnect() {
+  clearInterval(app.poll); app.okQueue=[]; app.prbResolve=null;
+  if(app.transport==='websocket'){
+    if(app.wsConn){
+      try{app.wsConn.send(JSON.stringify({cmd:'disconnect'}));}catch(_){}
+      app.wsConn.close(); app.wsConn=null;
+    }
+  } else {
+    try{await app.writer?.releaseLock?.();}catch(_){}
+    try{await app.port?.close?.();}catch(_){}
+    app.writer=null; app.port=null;
+  }
+  app.connected=false; app.grbl.state='Disconnected';
+  addLog('Disconnected','sys'); render();
+}
+
+// ── CENTRALISED LINE HANDLER ────────────────────────────────────────────────
+function handleLine(line){
+  if(!line) return;
+  if(line.startsWith('<')){
+    const s=parseStatus(line);
+    if(s){
+      // Detect pin state changes for switch trigger popups
+      const prevPn=app.grbl.Pn||'';
+      const newPn=s.Pn||'';
+      const prevState=app.grbl.state;
+      app.grbl={...app.grbl,...s};
+      // Clear homing flag when machine leaves Home state
+      if(prevState==='Home'&&s.state!=='Home') app.homing=false;
+      checkPinChanges(prevPn, newPn);
+      renderLive();
+    }
+  } else if(line==='ok'){
+    releaseOk();
+    // If we were loading config, ok signals end of $$ dump
+    if(app.cfgLoading){ app.cfgLoading=false; render(); }
+  } else if(line.startsWith('$')&&line.includes('=')&&app.cfgLoading){
+    // Parse $key=value lines from $$ response
+    const eq=line.indexOf('=');
+    const key=line.slice(1,eq).trim();
+    const rest=line.slice(eq+1);
+    // Value is before any space/comment
+    const val=rest.split(/[\s\/]/)[0].trim();
+    const comment=rest.includes('/')?rest.slice(rest.indexOf('/')+1).trim():'';
+    app.cfgSettings[key]={val, comment};
+  } else if(line.startsWith('error:')){
+    addLog(line,'err'); releaseOk(); notify('⚠ '+line,'#ef4444'); render();
+  } else if(line.startsWith('ALARM:')){
+    addLog(line,'err'); releaseOk(); notify('🚨 ALARM: '+line,'#ef4444'); render();
+  } else if(line.startsWith('[PRB:')){
+    addLog(line,'rx');
+    const prb=parsePRB(line);
+    if(prb&&app.prbResolve){const r=app.prbResolve;app.prbResolve=null;r(prb);}
+    else if(prb) notify('✓ Probe: '+line,'#22c55e');
+    renderLog();
+  } else {
+    addLog(line,'rx'); renderLog();
+  }
+}
+
+// ── JOG ────────────────────────────────────────────────────────────────────
+function jog(axis,dir){
+  const step=axis==='Z'?app.jogStepZ:app.jogStep;
+  const c=`$J=G21G91${axis}${(dir*step).toFixed(3)}F${app.jogFeed}`;
+  write(c); addLog(c,'tx'); render();
+}
+
+// ── FILE OPERATIONS ─────────────────────────────────────────────────────────
+// ── JOB TIME ESTIMATOR ────────────────────────────────────────────────────
+function estimateJobTime(lines){
+  let t=0, x=0, y=0, z=0, f=1000, rapid=3000;
+  let isAbs=true;
+  for(const raw of lines){
+    const l=raw.toUpperCase().replace(/\s+/g,'');
+    if(!l||l.startsWith(';')||l.startsWith('(')) continue;
+    if(l.includes('G90')) isAbs=true;
+    if(l.includes('G91')) isAbs=false;
+    const fMatch=l.match(/F([\d.]+)/); if(fMatch) f=parseFloat(fMatch[1]);
+    const getVal=(ax,cur)=>{const m=l.match(new RegExp(ax+'([\\-\\d.]+)')); return m?parseFloat(m[1]):cur;};
+    const nx=getVal('X',isAbs?x:0), ny=getVal('Y',isAbs?y:0), nz=getVal('Z',isAbs?z:0);
+    const dx=isAbs?nx-x:nx, dy=isAbs?ny-y:ny, dz=isAbs?nz-z:nz;
+    const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(dist>0){
+      const isRapid=l.startsWith('G0');
+      t+=dist/(isRapid?rapid:f)*60;
+    }
+    if(isAbs){x=nx;y=ny;z=nz;} else{x+=nx;y+=ny;z+=nz;}
+  }
+  const h=Math.floor(t/3600), m=Math.floor((t%3600)/60), s=Math.floor(t%60);
+  return t<1?null: h>0?`${h}h ${m}m ${s}s`:`${m}m ${s}s`;
+}
+
+
+function loadFile(e){
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=ev=>{
+    const lines=ev.target.result.split('\n').map(l=>{
+      const si=l.indexOf(';'); return (si>=0?l.slice(0,si):l).replace(/\(.*?\)/g,'').trim();
+    }).filter(l=>l&&l!=='%');
+    app.glines=lines; app.gfile=f.name; app.progress=0;
+    app.jobTimeEst=estimateJobTime(lines);
+    app.vizPaths=parseGcodePaths(lines);
+    app.vizZoom=1; app.vizPanX=0; app.vizPanY=0; app.vizFitted=false;
+    addLog(`Loaded: ${f.name}  (${lines.length} lines)`,'sys'); render();
+  };
+  r.readAsText(f); e.target.value='';
+}
+
+// G-code processor — applies autolevel Z correction in real-time
+class GcodeProcessor {
+  constructor(){ this.cx=0;this.cy=0;this.cz=0;this.abs=true; }
+  process(line){
+    const up=line.toUpperCase();
+    if(/G91/.test(up)) this.abs=false;
+    if(/G90/.test(up)) this.abs=true;
+    const xm=line.match(/[Xx](-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
+    const ym=line.match(/[Yy](-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
+    const zm=line.match(/[Zz](-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
+    const nx=xm?parseFloat(xm[1]):null;
+    const ny=ym?parseFloat(ym[1]):null;
+    const nz=zm?parseFloat(zm[1]):null;
+    if(nx!==null) this.cx=this.abs?nx:this.cx+nx;
+    if(ny!==null) this.cy=this.abs?ny:this.cy+ny;
+    if(!app.autolevel.enabled||!app.autolevel.measured){
+      if(nz!==null) this.cz=this.abs?nz:this.cz+nz;
+      return line;
+    }
+    // Only correct G1 cutting moves with Z
+    if(!up.match(/G0*1\b/)||nz===null){
+      if(nz!==null) this.cz=this.abs?nz:this.cz+nz;
+      return line;
+    }
+    const zWork=this.abs?nz:this.cz+nz;
+    const correction=getZCorrection(this.cx,this.cy);
+    const zCorr=(zWork+correction).toFixed(4);
+    this.cz=zWork;
+    return line.replace(/[Zz]-?\d+\.?\d*(?:[eE][+-]?\d+)?/i,'Z'+zCorr);
+  }
+}
+
+async function sendLine(cmd){
+  await write(cmd); addLog(cmd,'tx');
+  try{await waitForOk(15000);}catch(e){throw e;}
+}
+
+async function runFile(){
+  if(!app.glines.length||!app.connected||app.sending) return;
+  app.sending=true; app.stopSend=false; app.okQueue=[]; render();
+  const proc=new GcodeProcessor();
+  if(app.autolevel.enabled&&app.autolevel.measured)
+    addLog(`▶ Running with autolevel: ${app.gfile}`,'sys');
+  else addLog(`▶ Running: ${app.gfile}`,'sys');
+  for(let i=0;i<app.glines.length;i++){
+    if(app.stopSend){addLog('Stopped.','err');break;}
+    const line=proc.process(app.glines[i]);
+    await write(line);
+    try{await waitForOk(15000);}
+    catch(ex){addLog(`Line ${i+1}: ${ex.message} — stopping`,'err');app.stopSend=true;break;}
+    app.progress=Math.round(((i+1)/app.glines.length)*100);
+    if(i%8===0) render();
+  }
+  app.sending=false; app.okQueue=[];
+  if(!app.stopSend){addLog('✓ Complete','sys');notify('✓ Job complete!');}
+  render();
+}
+
+function stopFile(){
+  app.stopSend=true; app.sending=false; app.okQueue=[];
+  write('\x18',true); write('!',true);
+  addLog('⚠ Stop + Reset','err'); render();
+}
+
+// ── FRAME JOB ───────────────────────────────────────────────────────────────
+function parseExtents(lines){
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  let abs=true,cx=0,cy=0;
+  for(const line of lines){
+    const u=line.toUpperCase().replace(/\s/g,'');
+    if(/G91/.test(u)) abs=false; if(/G90/.test(u)) abs=true;
+    const xm=u.match(/X(-?\d+\.?\d*)/),ym=u.match(/Y(-?\d+\.?\d*)/);
+    if(xm){cx=abs?parseFloat(xm[1]):cx+parseFloat(xm[1]);minX=Math.min(minX,cx);maxX=Math.max(maxX,cx);}
+    if(ym){cy=abs?parseFloat(ym[1]):cy+parseFloat(ym[1]);minY=Math.min(minY,cy);maxY=Math.max(maxY,cy);}
+  }
+  return{minX,maxX,minY,maxY};
+}
+
+async function frameJob(){
+  if(!app.glines.length||!app.connected) return;
+  const{minX,maxX,minY,maxY}=parseExtents(app.glines);
+  if(!isFinite(minX)){addLog('No XY coords in file','err');render();return;}
+  const z=app.settings.safeZ;
+  addLog(`Frame: X[${minX.toFixed(2)}→${maxX.toFixed(2)}] Y[${minY.toFixed(2)}→${maxY.toFixed(2)}]`,'sys');
+  app.okQueue=[];
+  for(const cmd of[`G90`,`G0 Z${z.toFixed(3)}`,
+    `G0 X${minX.toFixed(3)} Y${minY.toFixed(3)}`,`G0 X${maxX.toFixed(3)} Y${minY.toFixed(3)}`,
+    `G0 X${maxX.toFixed(3)} Y${maxY.toFixed(3)}`,`G0 X${minX.toFixed(3)} Y${maxY.toFixed(3)}`,
+    `G0 X${minX.toFixed(3)} Y${minY.toFixed(3)}`]){
+    await write(cmd); addLog(cmd,'tx');
+    try{await waitForOk(12000);}catch(_){break;}
+    render();
+  }
+  addLog('Frame done','sys'); notify('Frame complete'); render();
+}
+
+// ── PROBE ROUTINES (matching macros exactly) ────────────────────────────────
+async function runProbe(checklist, title, seq){
+  if(!app.connected) return;
+  if(!confirm(`${title}\n\n${checklist}\n\nClick OK to begin.`)) return;
+  try {
+    for(const cmd of seq){ await sendLine(cmd); }
+    notify('✓ '+title+' complete','#22c55e');
+    showRemoveClipAlert();
+  } catch(e){
+    addLog('Probe error: '+e.message,'err');
+    notify('⚠ Probe stopped','#ef4444');
+  }
+  render();
+}
+
+function showRemoveClipAlert(){
+  const existing=document.getElementById('remove-clip-alert');
+  if(existing) existing.remove();
+  const popup=document.createElement('div');
+  popup.id='remove-clip-alert';
+  popup.style.cssText=`
+    position:fixed; top:60px; left:50%; transform:translateX(-50%);
+    z-index:99998; min-width:300px;
+    background:rgba(30,20,5,0.97);
+    border:2px solid #f59e0b;
+    border-radius:10px; padding:16px 24px;
+    box-shadow:0 0 40px rgba(245,158,11,0.45);
+    font-family:inherit; text-align:center;
+    animation:pinpopup 0.15s ease-out;
+  `;
+  popup.innerHTML=`
+    <div style="font-size:26px;margin-bottom:6px">⚠️</div>
+    <div style="font-size:14px;font-weight:700;color:#f59e0b;letter-spacing:0.08em;margin-bottom:6px">
+      REMOVE PROBE CLIP
+    </div>
+    <div style="font-size:12px;color:#c8d4e4;opacity:0.9;line-height:1.6">
+      Detach the ground clip from the bit<br>before running your job.
+    </div>
+    <div style="margin-top:10px">
+      <button onclick="this.parentElement.parentElement.remove()" style="
+        background:#f59e0b20;border:1px solid #f59e0b60;color:#f59e0b;
+        border-radius:5px;padding:5px 18px;font-size:12px;font-weight:700;
+        cursor:pointer;font-family:inherit;">OK — Clip Removed</button>
+    </div>
+  `;
+  document.body.appendChild(popup);
+}
+
+function probeZ_only(){
+  const s=app.settings;
+  const seq=[
+    'G21','G91',
+    `G38.2 Z-${s.probeMaxZ} F${s.probeFeedFast}`,
+    'G0 Z2',
+    `G38.2 Z-${s.probeMaxZ} F${s.probeFeedFine}`,
+    `G10 L20 P1 Z${s.plateZ_zonly}`,
+    'G0 Z10',   // just retract Z — no XY move
+    'G90',
+  ];
+  runProbe(
+    '• Ground clip on bit\n• Plate flat on work surface\n• Z above plate (~15mm)',
+    'Z Probe',seq);
+}
+
+function probeXYZ(){
+  const s=app.settings;
+  const r=(s.endmill/2).toFixed(4);
+  const xSet=`G10 L20 P1 X-${(s.endmill/2+s.plateX).toFixed(4)}`;
+  const ySet=`G10 L20 P1 Y-${(s.endmill/2+s.plateY).toFixed(4)}`;
+  const seq=[
+    'G21','G91',
+    // Z — double pass
+    `G38.2 Z-${s.probeMaxZ} F${s.probeFeedFast}`,
+    'G0 Z2',
+    `G38.2 Z-${s.probeMaxZ} F${s.probeFeedFine}`,
+    `G10 L20 P1 Z${s.plateZ_xyz}`,
+    'G0 Z3',
+    // X — move left, drop, double pass
+    'G0 X-25','G0 Z-10',
+    `G38.2 X${s.probeMaxXY} F${s.probeFeedFast}`,
+    'G0 X-2',
+    `G38.2 X${s.probeMaxXY} F${s.probeFeedFine}`,
+    xSet,
+    'G0 X-10','G0 Y-25',
+    // Y — absolute X5, then incremental double pass
+    'G90','G0 X5','G91',
+    `G38.2 Y${s.probeMaxXY} F${s.probeFeedFast}`,
+    'G0 Y-2',
+    `G38.2 Y${s.probeMaxXY} F${s.probeFeedFine}`,
+    ySet,
+    'G0 Y-10','G0 Z10',
+    'G90',   // retract only — no automatic XY return to avoid limit triggers
+  ];
+  runProbe(
+    `• Ground clip on bit\n• Plate in corner, ~15mm from bottom-left\n• Z ~15mm above plate\nEndmill: ${s.endmill}mm  X/Y plate: ${s.plateX}/${s.plateY}mm  Z plate: ${s.plateZ_xyz}mm`,
+    '3-Axis Probe',seq);
+}
+
+function probePCB(){
+  const s=app.settings;
+  const seq=[
+    'G21',
+    'G91',
+    // Fast first pass
+    `G38.2 Z-${s.probeMaxZ} F${s.probeFeedFast}`,
+    // Retract 2mm above contact
+    'G0 Z2',
+    // Slow second pass — only 4mm max, starts from 2mm above so won't over-travel
+    `G38.2 Z-4 F${s.probeFeedFine}`,
+    // Set surface as Z0 — no plate thickness for PCB
+    'G10 L20 P1 Z0',
+    // Retract to safe height
+    'G0 Z5',
+    'G90',
+  ];
+  runProbe(
+    '• Ground clip on bit\n• No touch plate — bit contacts board surface directly\n• Position Z ~15mm above board',
+    'PCB Z Probe',seq);
+}
+
+// ── AUTOLEVEL ───────────────────────────────────────────────────────────────
+function getZCorrection(wx,wy){
+  const al=app.autolevel;
+  if(!al.measured||!al.enabled||!al.grid.length) return 0;
+  const{gridCols:gc,gridRows:gr,minX,maxX,minY,maxY,grid}=al;
+  const nx=Math.max(0,Math.min(gc-1,(wx-minX)/(maxX-minX)*(gc-1)));
+  const ny=Math.max(0,Math.min(gr-1,(wy-minY)/(maxY-minY)*(gr-1)));
+  const x0=Math.floor(nx),x1=Math.min(x0+1,gc-1);
+  const y0=Math.floor(ny),y1=Math.min(y0+1,gr-1);
+  const fx=nx-x0,fy=ny-y0;
+  const z00=grid[y0]?.[x0]??0,z10=grid[y0]?.[x1]??0;
+  const z01=grid[y1]?.[x0]??0,z11=grid[y1]?.[x1]??0;
+  return (1-fx)*(1-fy)*z00+fx*(1-fy)*z10+(1-fx)*fy*z01+fx*fy*z11;
+}
+
+async function startAutolevel(){
+  if(!app.connected) return;
+  const al=app.autolevel;
+  const{gridCols:gc,gridRows:gr,minX:rawMinX,maxX:rawMaxX,minY:rawMinY,maxY:rawMaxY,
+        scanOffsetX:offX,scanOffsetY:offY,probeDepth,probeFeed,safeZAL}=al;
+  // Apply border offset — shrink boundary inward on all four sides
+  const minX=rawMinX+(offX||0), maxX=rawMaxX-(offX||0);
+  const minY=rawMinY+(offY||0), maxY=rawMaxY-(offY||0);
+  if(minX>=maxX||minY>=maxY){
+    addLog('⚠ Scan offset too large — no scan area remaining','err');
+    notify('⚠ Offset too large','#ef4444'); return;
+  }
+  const offsetNote=(offX||offY)?`\nBorder offset: ${offX}mm X / ${offY}mm Y\nEffective area: X[${minX}→${maxX}] Y[${minY}→${maxY}]`:'';
+  if(!confirm(`AUTOLEVEL SCAN\n\nGrid: ${gc} × ${gr} = ${gc*gr} points\nArea: X[${rawMinX}→${rawMaxX}] Y[${rawMinY}→${rawMaxY}]${offsetNote}\n\nEnsure Z is zeroed at work surface and ground clip is on.\n\nClick OK to begin.`)) return;
+  al.probing=true; al.stopProbing=false;
+  al.grid=Array.from({length:gr},()=>Array(gc).fill(null));
+  al.totalPts=gc*gr; al.currentPt=0;
+  addLog(`Autolevel: ${gc}×${gr} grid`,'sys'); render();
+  // Build point list in snake order (boustrophedon)
+  const pts=[];
+  for(let row=0;row<gr;row++){
+    const cols=row%2===0?[...Array(gc).keys()]:[...Array(gc).keys()].reverse();
+    for(const col of cols) pts.push({row,col});
+  }
+  app.okQueue=[];
+  try{
+    for(const{row,col} of pts){
+      if(al.stopProbing) break;
+      al.currentPt++;
+      const x=minX+(maxX-minX)*col/(gc-1);
+      const y=minY+(maxY-minY)*row/(gr-1);
+      addLog(`AL ${al.currentPt}/${al.totalPts}: X${x.toFixed(2)} Y${y.toFixed(2)}`,'sys');
+      // Move to safe Z then XY
+      await sendLine(`G90 G0 Z${safeZAL}`);
+      await sendLine(`G90 G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
+      // Probe — set up PRB capture first
+      const prbP=waitForPRB(20000);
+      await write(`G38.2 Z${probeDepth} F${probeFeed}`);
+      addLog(`G38.2 Z${probeDepth} F${probeFeed}`,'tx');
+      try{
+        const prb=await prbP;
+        await waitForOk(5000);
+        if(prb.ok){
+          // Convert to work Z using current WCO
+          const wz=prb.z-(app.grbl.WCO?.[2]??0);
+          al.grid[row][col]=wz;
+          addLog(`  Z=${wz.toFixed(4)}`,'sys');
+        } else {
+          al.grid[row][col]=0;
+          addLog(`  Probe fail — using 0`,'err');
+        }
+      } catch(ex){
+        addLog(`  Timeout — using 0`,'err');
+        al.grid[row][col]=0;
+        await waitForOk(3000).catch(()=>{});
+      }
+      render();
+    }
+    // Normalize: subtract mean so corrections are centered around zero
+    if(!al.stopProbing){
+      const vals=al.grid.flat().filter(v=>v!==null);
+      const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
+      for(let r=0;r<gr;r++) for(let c=0;c<gc;c++){
+        if(al.grid[r][c]!==null) al.grid[r][c]-=mean;
+      }
+      al.measured=true;
+      await sendLine(`G90 G0 Z${safeZAL}`);
+      saveAL();
+      const range=(Math.max(...vals)-Math.min(...vals)).toFixed(4);
+      addLog(`Autolevel done. Surface range: ${range}mm`,'sys');
+      notify(`✓ Autolevel complete  range: ${range}mm`,'#06b6d4');
+      showRemoveClipAlert();
+    }
+  } catch(e){
+    addLog('Autolevel error: '+e.message,'err');
+  }
+  al.probing=false; render();
+}
+
+function stopAutolevel(){
+  app.autolevel.stopProbing=true;
+  // Retract to safe Z immediately so we don't drag across the work
+  if(app.connected){
+    const safeZ=app.autolevel.safeZAL||2;
+    write(`G90 G0 Z${safeZ}`);
+    addLog(`STOP SCAN — retracting to Z${safeZ}`,'sys');
+  }
+}
+
+function buildHeightMap(){
+  const al=app.autolevel;
+  const{grid,gridCols:gc,gridRows:gr}=al;
+  if(!al.measured||!grid.length) return null;
+  let minZ=Infinity,maxZ=-Infinity;
+  grid.forEach(row=>row.forEach(z=>{if(z!=null){minZ=Math.min(minZ,z);maxZ=Math.max(maxZ,z);}}));
+  const range=maxZ-minZ||1;
+  const wrap=h('div',{style:{marginBottom:'8px'}});
+  wrap.appendChild(h('div',{style:{fontSize:'9px',color:C.muted,marginBottom:'4px',display:'flex',justifyContent:'space-between'}},
+    h('span',{},'min: '+(minZ>=0?'+':'')+minZ.toFixed(3)+'mm'),
+    h('span',{style:{color:'#06b6d4'}},`${gc}×${gr}`),
+    h('span',{},' max: '+(maxZ>=0?'+':'')+maxZ.toFixed(3)+'mm')
+  ));
+  const grid2=h('div',{style:{display:'grid',gridTemplateColumns:`repeat(${gc},1fr)`,gap:'1px',
+    background:C.border,borderRadius:'4px',overflow:'hidden'}});
+  for(let row=gr-1;row>=0;row--){
+    for(let col=0;col<gc;col++){
+      const z=grid[row]?.[col];
+      let bg=C.surface,txt='?';
+      if(z!=null){
+        const t=(z-minZ)/range;
+        const r2=Math.round(255*Math.max(0,2*t-1));
+        const g2=Math.round(255*Math.min(1,Math.min(2*t,2-2*t)));
+        const b2=Math.round(255*Math.max(0,1-2*t));
+        bg=`rgb(${r2},${g2},${b2})`;
+        txt=(z>=0?'+':'')+z.toFixed(3);
+      }
+      grid2.appendChild(h('div',{style:{background:bg,padding:'3px 1px',textAlign:'center',
+        fontSize:'8px',color:'rgba(255,255,255,0.9)',minHeight:'26px',
+        display:'flex',alignItems:'center',justifyContent:'center'}},txt));
+    }
+  }
+  wrap.appendChild(grid2);
+  return wrap;
+}
+
+// ── DRAG + RESIZE ───────────────────────────────────────────────────────────
+const SNAP=8;
+function snap(v){return Math.round(v/SNAP)*SNAP;}
+document.addEventListener('mousemove',e=>{
+  if(app.drag){
+    const i=app.panels.findIndex(p=>p.id===app.drag); if(i<0) return;
+    app.panels[i]={...app.panels[i],
+      x:snap(Math.max(0,e.clientX-app.dragOff.x)),
+      y:snap(Math.max(48,e.clientY-app.dragOff.y))};
+    render();
+  }
+  if(app.resize){
+    const i=app.panels.findIndex(p=>p.id===app.resize); if(i<0) return;
+    const{x:sx,y:sy,w:sw,h:sh}=app.resizeStart;
+    // Per-panel minimum widths to prevent stepper inputs from overflowing
+    const MIN_W={probe:300,autolevel:270,spindle:240,status:280,conn:220,jog:230,config:320};
+    const minW=MIN_W[app.panels[i].id]||180;
+    const newW=Math.max(minW,sw+(e.clientX-sx));
+    const newH=sh!==null?Math.max(120,sh+(e.clientY-sy)):null;
+    app.panels[i]={...app.panels[i],w:newW,h:newH};
+    render();
+  }
+});
+document.addEventListener('mouseup',()=>{
+  if(app.drag||app.resize) savePanels();
+  app.drag=null; app.resize=null; document.body.style.cursor='';
+});
+
+// ── PANEL BUILDER ───────────────────────────────────────────────────────────
+function buildPanel(p){
+  const hasFixedH=p.h!==null&&p.h!==undefined;
+  const isCollapsed=!!p.collapsed;
+  const panel=h('div',{style:{
+    position:'absolute',left:p.x+'px',top:p.y+'px',width:p.w+'px',
+    ...(hasFixedH&&!isCollapsed?{height:p.h+'px',overflow:'hidden'}:{}),
+    background:C.surface,border:`1px solid ${p.accent}22`,borderRadius:'8px',
+    boxShadow:'0 8px 32px rgba(0,0,0,0.3)'
+  }});
+  const tb=h('div',{
+    style:{background:`${p.accent}14`,borderBottom:`1px solid ${p.accent}28`,
+      padding:'7px 12px',cursor:'grab',display:'flex',alignItems:'center',
+      justifyContent:'space-between',
+      borderRadius:isCollapsed?'8px':'8px 8px 0 0',flexShrink:'0'},
+    onMousedown:e=>{
+      app.drag=p.id;
+      app.dragOff={x:e.clientX-p.x,y:e.clientY-p.y};
+      document.body.style.cursor='grabbing';
+      e.preventDefault();
+    }
+  },
+    h('span',{style:{fontSize:'10px',fontWeight:'700',color:p.accent,letterSpacing:'0.12em',pointerEvents:'none'}},p.title),
+    h('div',{style:{display:'flex',gap:'6px',alignItems:'center'}},
+      h('button',{
+        style:{background:'transparent',border:'none',color:`${p.accent}80`,
+          fontSize:'14px',lineHeight:'1',cursor:'pointer',padding:'0 2px',
+          fontFamily:'inherit'},
+        onMousedown:e=>e.stopPropagation(),
+        onClick:e=>{
+          e.stopPropagation();
+          const i=app.panels.findIndex(q=>q.id===p.id);
+          if(i>=0){ app.panels[i]={...app.panels[i],collapsed:!app.panels[i].collapsed}; savePanels(); render(); }
+        }
+      }, isCollapsed?'▶':'▼'),
+      h('span',{style:{color:`${p.accent}50`,fontSize:'12px',pointerEvents:'none'}},'⣿')
+    )
+  );
+  panel.appendChild(tb);
+  if(isCollapsed) return panel;
+
+  // Body
+  const body=h('div',{style:{padding:'12px',overflow:hasFixedH?'auto':'visible',
+    height:hasFixedH?`calc(100% - 34px)`:undefined}});
+
+  // ── CONNECTION ─────────────────────────────────────────────────────────
+  if(p.id==='conn'){
+    // Transport mode badge
+    const modeBadge=h('div',{style:{
+      fontSize:'10px',fontWeight:'700',marginBottom:'8px',padding:'4px 8px',
+      borderRadius:'4px',textAlign:'center',
+      background: app.transport==='websocket'?'#06b6d415':
+                  app.transport==='webserial'?'#22c55e15':'#ef444415',
+      color: app.transport==='websocket'?'#06b6d4':
+             app.transport==='webserial'?'#22c55e':'#ef4444',
+      border:`1px solid ${app.transport==='websocket'?'#06b6d430':
+              app.transport==='webserial'?'#22c55e30':'#ef444430'}`,
+    }},
+      app.transport==='websocket' ? `⬛ SERVER MODE  ·  ${app.wsClientCount} viewer${app.wsClientCount!==1?'s':''}` :
+      app.transport==='webserial' ? '⚡ LOCAL MODE  ·  Web Serial' :
+      app.transport==='detecting' ? '⏳ Detecting…' :
+      '⚠ No transport available'
+    );
+    body.appendChild(modeBadge);
+
+    // Port selector (server mode) or baud (local mode)
+    if(app.transport==='websocket'){
+      // Port dropdown from server
+      const pr=h('div',{style:{marginBottom:'10px'}});
+      const portSel=h('select',{style:{width:'100%',background:C.bg,color:C.text,
+        border:`1px solid ${C.border}`,borderRadius:'5px',padding:'5px 8px',
+        fontSize:'12px',fontFamily:'inherit',marginBottom:'6px'},
+        onChange:e=>{app.selectedPort=e.target.value;}});
+      if(!app.availablePorts.length){
+        portSel.appendChild(h('option',{},'No ports found'));
+        portSel.disabled=true;
+      } else {
+        app.availablePorts.forEach(p2=>{
+          const o=h('option',{value:p2.path},`${p2.path}  ${p2.manufacturer?'('+p2.manufacturer+')':''}`);
+          if(p2.path===app.selectedPort) o.selected=true;
+          portSel.appendChild(o);
+        });
+      }
+      pr.appendChild(portSel);
+      // Baud row
+      const br2=h('div',{style:{display:'flex',gap:'6px',alignItems:'center',marginBottom:'6px'}});
+      br2.appendChild(h('span',{style:{fontSize:'11px',color:C.muted}},'BAUD'));
+      const sel2=h('select',{style:{background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'4px 8px',fontSize:'12px',fontFamily:'inherit'},
+        onChange:e=>{app.baud=+e.target.value;}});
+      [9600,115200,230400,1000000].forEach(b=>{
+        const o=h('option',{value:b},b+''); if(b===app.baud) o.selected=true; sel2.appendChild(o);
+      });
+      br2.appendChild(sel2);
+      pr.appendChild(br2);
+      body.appendChild(pr);
+      // Refresh ports button
+      const rfRow=h('div',{style:{display:'flex',gap:'6px',marginBottom:'10px'}});
+      rfRow.appendChild(mkBtn('↺ Refresh Ports',async()=>{
+        const r=await fetch('/api/ports'); const ports=await r.json();
+        app.availablePorts=ports; if(ports.length) app.selectedPort=ports[0].path; render();
+      },'#06b6d4',{small:true,full:true}));
+      body.appendChild(rfRow);
+    } else {
+      const br=h('div',{style:{display:'flex',gap:'8px',alignItems:'center',marginBottom:'10px'}},
+        h('span',{style:{fontSize:'11px',color:C.muted}},'BAUD'));
+      const sel=h('select',{style:{background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'4px 8px',fontSize:'12px',fontFamily:'inherit'},
+        onChange:e=>{app.baud=+e.target.value;}});
+      [9600,115200,230400,1000000].forEach(b=>{
+        const o=h('option',{value:b},b+''); if(b===app.baud) o.selected=true; sel.appendChild(o);
+      });
+      br.appendChild(sel); body.appendChild(br);
+    }
+
+    const canConnect=app.transport==='websocket'?!!app.selectedPort:app.transport==='webserial';
+    body.appendChild(app.connected
+      ?mkBtn('✕  DISCONNECT',disconnect,'#ef4444',{full:true})
+      :mkBtn(app.transport==='websocket'?'⬛  CONNECT VIA SERVER':'⚡  CONNECT USB',
+        connect,'#22c55e',{full:true,disabled:!canConnect||app.transport==='detecting'}));
+  }
+
+  // ── STATUS ─────────────────────────────────────────────────────────────
+  if(p.id==='status'){
+    const mpos=app.grbl.MPos||[0,0,0];
+    const wco=app.grbl.WCO||[0,0,0];
+    const wpos=mpos.map((v,i)=>v-wco[i]);
+    const sc=STATE_COLOR[app.grbl.state]||'#334155';
+    const feed=(app.grbl.FS||[0,0])[0],rpm=(app.grbl.FS||[0,0])[1];
+
+    // ── Per-axis columns ──────────────────────────────────────────────────
+    const axisColors=['#ef4444','#22c55e','#3b82f6'];
+    const axisLetters=['X','Y','Z'];
+    const axisZeroCmds=['G10 L20 P1 X0','G10 L20 P1 Y0','G10 L20 P1 Z0'];
+    const axisHomeCmds=['$HX','$HY','$HZ'];
+    const wIds=['wx','wy','wz'], mIds=['mx','my','mz'];
+
+    const colsRow=h('div',{style:{display:'flex',gap:'6px',marginBottom:'10px'}});
+    axisLetters.forEach((ax,i)=>{
+      const col=h('div',{style:{flex:'1',display:'flex',flexDirection:'column',gap:'4px'}});
+
+      // Axis label pill
+      col.appendChild(h('div',{style:{textAlign:'center',fontSize:'11px',fontWeight:'800',
+        letterSpacing:'0.12em',padding:'2px 0',borderRadius:'5px',
+        background:`${axisColors[i]}20`,color:axisColors[i],border:`1px solid ${axisColors[i]}40`}},ax));
+
+      // WORK value — big & prominent
+      const wBox=h('div',{style:{background:`${axisColors[i]}12`,border:`1px solid ${axisColors[i]}35`,
+        borderRadius:'7px',padding:'6px 4px',textAlign:'center'}});
+      wBox.appendChild(h('div',{style:{fontSize:'9px',color:`${axisColors[i]}99`,
+        marginBottom:'2px',letterSpacing:'0.08em'}},'WORK'));
+      const wVal=h('div',{id:wIds[i],style:{fontSize:'17px',fontWeight:'800',
+        color:axisColors[i],fontVariantNumeric:'tabular-nums',letterSpacing:'-0.01em'}},
+        wpos[i].toFixed(3));
+      wBox.appendChild(wVal);
+      col.appendChild(wBox);
+
+      // Home + Zero buttons
+      const btnRow=h('div',{style:{display:'flex',gap:'3px'}});
+      // Home
+      btnRow.appendChild(h('button',{
+        style:{flex:'1',background:'transparent',border:`1px solid ${app.connected?'#06b6d440':C.border}`,
+          color:app.connected?'#06b6d4':C.muted,borderRadius:'5px',padding:'4px 2px',
+          fontSize:'20px',lineHeight:'1',cursor:app.connected?'pointer':'not-allowed',fontFamily:'inherit',
+          opacity:app.connected?'1':'0.4'},
+        onClick:app.connected?()=>{app.homing=true;write(axisHomeCmds[i]);addLog(axisHomeCmds[i],'tx');}:null
+      },'⌂'));
+      // Zero
+      btnRow.appendChild(h('button',{
+        style:{flex:'1',background:'transparent',border:`1px solid ${app.connected?axisColors[i]+'40':C.border}`,
+          color:app.connected?axisColors[i]:C.muted,borderRadius:'5px',padding:'4px 2px',
+          fontSize:'18px',fontWeight:'800',lineHeight:'1',cursor:app.connected?'pointer':'not-allowed',
+          fontFamily:'inherit',opacity:app.connected?'1':'0.4'},
+        onClick:app.connected?()=>{write(axisZeroCmds[i]);addLog(axisZeroCmds[i],'tx');}:null
+      },'0'));
+      col.appendChild(btnRow);
+
+      // MACH value — smaller, muted
+      const mBox=h('div',{style:{background:C.bg,borderRadius:'6px',padding:'4px',textAlign:'center'}});
+      mBox.appendChild(h('div',{style:{fontSize:'9px',color:C.muted,marginBottom:'1px',letterSpacing:'0.08em'}},'MACH'));
+      const mVal=h('div',{id:mIds[i],style:{fontSize:'12px',fontWeight:'600',
+        color:C.muted,fontVariantNumeric:'tabular-nums'}},mpos[i].toFixed(3));
+      mBox.appendChild(mVal);
+      col.appendChild(mBox);
+
+      colsRow.appendChild(col);
+    });
+    body.appendChild(colsRow);
+    body.appendChild(sep());
+
+    // ── Feed / Spindle / State row ─────────────────────────────────────────
+    const sr=h('div',{style:{display:'flex',gap:'6px',marginBottom:'8px'}});
+    [['FEED',feed,'#22c55e','grbl-feed'],['SPINDLE',rpm,'#f59e0b','grbl-rpm'],['STATE',app.grbl.state,sc,'grbl-state']].forEach(([l,v,c,id])=>{
+      const valEl=h('div',{id,style:{fontSize:l==='STATE'?'12px':'16px',fontWeight:'700',color:c}},''+v);
+      sr.appendChild(h('div',{style:{flex:'1',background:C.bg,borderRadius:'6px',padding:'5px 8px'}},
+        h('div',{style:{fontSize:'9px',color:C.muted,marginBottom:'2px'}},l), valEl));
+    });
+    body.appendChild(sr);
+    body.appendChild(sep());
+
+    // ── Action buttons row ────────────────────────────────────────────────
+    const ar=h('div',{style:{display:'flex',gap:'5px',marginBottom:'8px'}});
+    ar.appendChild(mkBtn('⌂ Go To Zero',()=>{write('G90G0X0Y0');addLog('G90G0X0Y0','tx');},'#06b6d4',{small:true,disabled:!app.connected,full:true}));
+    ar.appendChild(mkBtn('↺ Zero All',()=>{write('G10 L20 P1 X0 Y0 Z0');addLog('G10 L20 P1 X0 Y0 Z0','tx');},'#3b82f6',{small:true,disabled:!app.connected,full:true}));
+    ar.appendChild(mkBtn('⌂ Home All',()=>{app.homing=true;write('$H');addLog('$H','tx');},'#06b6d4',{small:true,disabled:!app.connected,full:true}));
+    body.appendChild(ar);
+    // Unlock button separately — less prominent
+    body.appendChild(mkBtn('🔓 Unlock ($X)',()=>{write('$X');addLog('$X','tx');render();},'#a855f7',{small:true,disabled:!app.connected,full:true}));
+    // ── OVERRIDES ──────────────────────────────────────────────────────────
+    body.appendChild(sep());
+    const ov=app.grbl.Ov||[100,100,100];
+    const ovLabel=h('div',{id:'ov-label',style:{fontSize:'10px',fontWeight:'700',color:'#64748b',
+      letterSpacing:'0.1em',marginBottom:'6px'}},`OVERRIDES  ·  F:${ov[0]}%  R:${ov[1]}%  S:${ov[2]}%`);
+    body.appendChild(ovLabel);
+    // Feed override row
+    const fovRow=h('div',{style:{display:'flex',gap:'4px',alignItems:'center',marginBottom:'5px'}});
+    fovRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,width:'40px'}},'FEED'));
+    [['−10','\x92'],['−1','\x94'],['100%','\x90'],['+1','\x93'],['+10','\x91']].forEach(([l,b])=>{
+      fovRow.appendChild(h('button',{style:{background:'transparent',border:`1px solid ${C.border}`,
+        color:b==='\x90'?'#22c55e':C.muted,borderRadius:'4px',padding:'3px 7px',fontSize:'11px',
+        cursor:!app.connected?'not-allowed':'pointer',fontFamily:'inherit',
+        opacity:app.connected?'1':'0.4'},
+        onClick:app.connected?()=>write(b,true):null},l));
+    });
+    body.appendChild(fovRow);
+    // Spindle override row
+    const sovRow=h('div',{style:{display:'flex',gap:'4px',alignItems:'center'}});
+    sovRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,width:'40px'}},'SPNDL'));
+    [['-10','\x9b'],['-1','\x9d'],['100%','\x99'],['+1','\x9c'],['+10','\x9a']].forEach(([l,b])=>{
+      sovRow.appendChild(h('button',{style:{background:'transparent',border:`1px solid ${C.border}`,
+        color:b==='\x99'?'#f97316':C.muted,borderRadius:'4px',padding:'3px 7px',fontSize:'11px',
+        cursor:!app.connected?'not-allowed':'pointer',fontFamily:'inherit',
+        opacity:app.connected?'1':'0.4'},
+        onClick:app.connected?()=>write(b,true):null},l));
+    });
+    body.appendChild(sovRow);
+  }
+
+  // ── JOG ────────────────────────────────────────────────────────────────
+  if(p.id==='jog'){
+    const sr=h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',marginBottom:'10px',alignItems:'center'}});
+    [0.01,0.1,1,5,10,50].forEach(s=>{
+      const a=app.jogStep===s;
+      sr.appendChild(h('button',{style:{background:a?'#f59e0b22':'transparent',
+        border:`1px solid ${a?'#f59e0b':C.border}`,color:a?'#f59e0b':C.muted,
+        borderRadius:'4px',padding:'3px 8px',fontSize:'11px',cursor:'pointer',fontFamily:'inherit'},
+        onClick:()=>{app.jogStep=s;render();}},s+''));
+    });
+    sr.appendChild(h('span',{style:{fontSize:'11px',color:C.muted}},'mm'));
+    body.appendChild(sr);
+    // 3×3 jog grid with diagonals — center is jog cancel (0x85)
+    const xyG=h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'4px',marginBottom:'8px'}});
+    const jogItems=[
+      {l:'↖', f:()=>{const s=app.jogStep;write(`$J=G21G91X-${s}Y${s}F${app.jogFeed}`);}},
+      {l:'Y+', f:()=>jog('Y',1)},
+      {l:'↗', f:()=>{const s=app.jogStep;write(`$J=G21G91X${s}Y${s}F${app.jogFeed}`);}},
+      {l:'X-', f:()=>jog('X',-1)},
+      {l:'⏹',  f:()=>write('\x85',true), cancel:true},
+      {l:'X+', f:()=>jog('X',1)},
+      {l:'↙', f:()=>{const s=app.jogStep;write(`$J=G21G91X-${s}Y-${s}F${app.jogFeed}`);}},
+      {l:'Y-', f:()=>jog('Y',-1)},
+      {l:'↘', f:()=>{const s=app.jogStep;write(`$J=G21G91X${s}Y-${s}F${app.jogFeed}`);}},
+    ];
+    jogItems.forEach(item=>{
+      const isDiag=item.l.length===2&&['↖','↗','↙','↘'].includes(item.l);
+      const isCancel=item.cancel;
+      xyG.appendChild(h('button',{style:{
+        background:!app.connected?'transparent':isCancel?'#ef444414':isDiag?'#f59e0b08':'#f59e0b14',
+        border:`1px solid ${!app.connected?C.border:isCancel?'#ef444435':isDiag?'#f59e0b25':'#f59e0b35'}`,
+        color:!app.connected?C.muted:isCancel?'#ef4444':isDiag?'#f59e0baa':'#f59e0b',
+        borderRadius:'6px',padding:'10px 4px',fontSize:isDiag?'14px':'12px',fontWeight:'700',
+        cursor:!app.connected?'not-allowed':'pointer',fontFamily:'inherit'},
+        onClick:app.connected?item.f:null},item.l));
+    });
+    body.appendChild(xyG);
+    // Z step selector — separate from XY step
+    const zStepRow=h('div',{style:{display:'flex',gap:'4px',alignItems:'center',marginBottom:'6px',flexWrap:'wrap'}});
+    zStepRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,marginRight:'2px'}},'Z step:'));
+    [0.01,0.1,0.5,1,5,10].forEach(s=>{
+      const a=app.jogStepZ===s;
+      zStepRow.appendChild(h('button',{style:{
+        background:a?'#a855f722':'transparent',
+        border:`1px solid ${a?'#a855f7':C.border}`,color:a?'#a855f7':C.muted,
+        borderRadius:'4px',padding:'3px 7px',fontSize:'11px',cursor:'pointer',fontFamily:'inherit'},
+        onClick:()=>{app.jogStepZ=s;render();}},s+''));
+    });
+    body.appendChild(zStepRow);
+    const zr=h('div',{style:{display:'flex',gap:'4px',justifyContent:'center',marginBottom:'10px'}});
+    [{l:'Z+',d:1},{l:'Z-',d:-1}].forEach(({l,d})=>{
+      zr.appendChild(h('button',{style:{background:!app.connected?'transparent':'#a855f714',
+        border:`1px solid ${!app.connected?C.border:'#a855f735'}`,color:!app.connected?C.muted:'#a855f7',
+        borderRadius:'6px',padding:'8px 22px',fontSize:'12px',fontWeight:'700',
+        cursor:!app.connected?'not-allowed':'pointer',fontFamily:'inherit'},
+        onClick:app.connected?()=>jog('Z',d):null},l));
+    });
+    body.appendChild(zr);
+    body.appendChild(mkRow('Jog Feed',mkNum(app.jogFeed,v=>{app.jogFeed=v;},'72px','1'),'mm/min'));
+    // Run + Frame moved here from File panel
+    if(app.glines.length>0){
+      body.appendChild(sep());
+      const bar=h('div',{style:{background:C.bg,borderRadius:'3px',height:'4px',overflow:'hidden',marginBottom:'6px'}});
+      bar.appendChild(h('div',{style:{width:app.progress+'%',height:'100%',background:'#a855f7',transition:'width 0.2s'}}));
+      body.appendChild(bar);
+      const br=h('div',{style:{display:'flex',gap:'6px'}});
+      if(!app.sending){
+        br.appendChild(mkBtn('▶  RUN',runFile,'#22c55e',{disabled:!app.connected,full:true}));
+        br.appendChild(mkBtn('⬜ FRAME',frameJob,'#06b6d4',{small:true,disabled:!app.connected}));
+      } else {
+        br.appendChild(mkBtn('⬛  STOP',stopFile,'#ef4444',{full:true}));
+      }
+      body.appendChild(br);
+      if(app.autolevel.enabled&&app.autolevel.measured)
+        body.appendChild(h('div',{style:{fontSize:'10px',color:'#06b6d4',marginTop:'4px'}},'⬛ AL active'));
+    }
+  }
+
+  // ── FILE ───────────────────────────────────────────────────────────────
+  if(p.id==='file'){
+    const fl=h('label',{style:{background:'#a855f710',border:'1px dashed #a855f740',borderRadius:'6px',
+      padding:'14px 10px',textAlign:'center',cursor:'pointer',display:'block',
+      color:'#a855f7',fontSize:'12px',marginBottom:'10px',lineHeight:'1.5'}},
+      app.gfile?`📄 ${app.gfile}`:'📁 Click to load G-code');
+    fl.appendChild(h('input',{type:'file',accept:'.nc,.gcode,.tap,.cnc,.txt',
+      style:{display:'none'},onChange:loadFile}));
+    body.appendChild(fl);
+    if(app.glines.length>0){
+      body.appendChild(h('div',{style:{fontSize:'11px',color:C.muted,marginBottom:'4px'}},`${app.glines.length} lines  ·  use Run/Frame in Jog panel`));
+      if(app.jobTimeEst) body.appendChild(h('div',{style:{fontSize:'11px',color:'#06b6d4',marginBottom:'4px'}},`⏱ Est. time: ${app.jobTimeEst}`));
+      if(app.sending) body.appendChild(h('div',{style:{fontSize:'11px',color:'#a855f7',marginBottom:'4px'}},app.progress+'%'));
+      body.appendChild(mkBtn('✕ Clear file',()=>{app.gfile=null;app.glines=[];app.progress=0;render();},C.muted,{small:true}));
+      if(app.autolevel.enabled&&app.autolevel.measured)
+        body.appendChild(h('div',{style:{fontSize:'10px',color:'#06b6d4',marginTop:'6px'}},'⬛ Autolevel active'));
+    }
+  }
+
+  // ── PROBE ──────────────────────────────────────────────────────────────
+  if(p.id==='probe'){
+    // PCB Home button — shown when configured in Config panel
+    if(app.settings.pcbHomeEnabled){
+      const pcbBtn=h('div',{style:{marginBottom:'10px'}});
+      pcbBtn.appendChild(mkBtn(
+        `⌂ GOTO PCB HOME  (M:${app.settings.pcbHomeX}, ${app.settings.pcbHomeY})`,
+        ()=>{
+          if(!app.connected){addLog('Not connected','err');return;}
+          const safeZ=app.settings.safeZ||5;
+          const x=app.settings.pcbHomeX, y=app.settings.pcbHomeY;
+          // Raise to safe Z first, then move in machine coords, then zero XY work
+          const seq=[
+            `G90 G0 Z${safeZ}`,
+            `G53 G0 X${x} Y${y}`,
+            'G10 L20 P1 X0 Y0',
+          ];
+          (async()=>{
+            for(const cmd of seq){ await sendLine(cmd); addLog(cmd,'tx'); }
+            notify(`✓ PCB Home — Work X0 Y0 set`,'#f97316');
+            render();
+          })().catch(e=>{ addLog('PCB Home error: '+e.message,'err'); });
+        },
+        '#f97316',{full:true,disabled:!app.connected}
+      ));
+      body.appendChild(pcbBtn);
+    }
+    const ss=h('div',{style:{background:C.bg+'aa',border:`1px solid ${C.border}`,
+      borderRadius:'6px',padding:'10px',marginBottom:'10px'}});
+    ss.appendChild(h('div',{style:{fontSize:'10px',fontWeight:'700',color:'#ef4444',
+      marginBottom:'8px',letterSpacing:'0.1em'}},'PROBE SETTINGS'));
+    // Endmill
+    const er=h('div',{style:{display:'flex',gap:'5px',flexWrap:'wrap',alignItems:'center',marginBottom:'8px'}});
+    er.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,width:'100%'}},'Endmill'));
+    [{l:'1/4"',v:6.35},{l:'1/8"',v:3.175},{l:'3mm',v:3},{l:'6mm',v:6}].forEach(({l,v})=>{
+      const a=Math.abs(app.settings.endmill-v)<0.01;
+      er.appendChild(h('button',{style:{background:a?'#ef444422':'transparent',
+        border:`1px solid ${a?'#ef4444':C.border}`,color:a?'#ef4444':C.muted,
+        borderRadius:'4px',padding:'3px 8px',fontSize:'11px',cursor:'pointer',fontFamily:'inherit'},
+        onClick:()=>{app.settings.endmill=v;saveSettings();render();}},l));
+    });
+    er.appendChild(mkNum(app.settings.endmill,v=>{app.settings.endmill=v;saveSettings();render();},'52px'));
+    er.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'mm'));
+    ss.appendChild(er);
+    ss.appendChild(sep());
+    ss.appendChild(mkRow('Z-only plate thickness',mkNum(app.settings.plateZ_zonly,v=>{app.settings.plateZ_zonly=v;saveSettings();},'68px'),'mm'));
+    ss.appendChild(mkRow('XYZ plate Z thickness', mkNum(app.settings.plateZ_xyz,  v=>{app.settings.plateZ_xyz=v; saveSettings();},'68px'),'mm'));
+    ss.appendChild(mkRow('XYZ plate X thickness', mkNum(app.settings.plateX,      v=>{app.settings.plateX=v;     saveSettings();},'68px'),'mm'));
+    ss.appendChild(mkRow('XYZ plate Y thickness', mkNum(app.settings.plateY,      v=>{app.settings.plateY=v;     saveSettings();},'68px'),'mm'));
+    ss.appendChild(sep());
+    ss.appendChild(mkRow('Fast probe feed',  mkNum(app.settings.probeFeedFast,v=>{app.settings.probeFeedFast=v;saveSettings();},'68px','1'),'mm/min'));
+    ss.appendChild(mkRow('Fine probe feed',  mkNum(app.settings.probeFeedFine,v=>{app.settings.probeFeedFine=v;saveSettings();},'68px','1'),'mm/min'));
+    ss.appendChild(mkRow('Max probe travel', mkNum(app.settings.probeMaxZ,    v=>{app.settings.probeMaxZ=v;    saveSettings();},'68px','1'),'mm'));
+    body.appendChild(ss);
+    // Probe buttons
+    const pb=h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px',marginBottom:'8px'}});
+    [['▼ Z only',probeZ_only,'#ef4444'],['⊕ XYZ',probeXYZ,'#ef4444'],['◎ PCB Z',probePCB,'#f59e0b']]
+      .forEach(([l,fn,c])=>pb.appendChild(mkBtn(l,fn,c,{disabled:!app.connected})));
+    body.appendChild(pb);
+    // Quick zero
+    const qz=h('div',{style:{display:'flex',gap:'5px',flexWrap:'wrap'}});
+    ['X','Y','Z'].forEach(a=>qz.appendChild(mkBtn(`Zero ${a}`,()=>{const c=`G10 L20 P1 ${a}0`;write(c);addLog(c,'tx');render();},'#3b82f6',{small:true,disabled:!app.connected})));
+    qz.appendChild(mkBtn('Zero All',()=>{write('G10 L20 P1 X0 Y0 Z0');addLog('G10 L20 P1 X0 Y0 Z0','tx');render();},'#22c55e',{small:true,disabled:!app.connected}));
+    body.appendChild(qz);
+  }
+
+  // ── AUTOLEVEL ──────────────────────────────────────────────────────────
+  if(p.id==='autolevel'){
+    const al=app.autolevel;
+    // Enable toggle
+    const enRow=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',marginBottom:'10px'}});
+    const enChk=h('input',{type:'checkbox',style:{cursor:'pointer'},onChange:e=>{al.enabled=e.target.checked;saveAL();render();}});
+    enChk.checked=al.enabled;
+    enChk.disabled=!al.measured;
+    enRow.appendChild(enChk);
+    enRow.appendChild(h('span',{style:{fontSize:'11px',color:al.measured?'#06b6d4':C.muted}},
+      al.measured?'Apply autolevel to job':'Measure surface first'));
+    body.appendChild(enRow);
+
+    if(al.probing){
+      // Probing in progress
+      body.appendChild(h('div',{style:{fontSize:'11px',color:'#06b6d4',marginBottom:'8px'}},
+        `Probing ${al.currentPt}/${al.totalPts}…`));
+      const pb=h('div',{style:{background:C.bg,borderRadius:'3px',height:'5px',overflow:'hidden',marginBottom:'10px'}});
+      pb.appendChild(h('div',{style:{width:`${al.totalPts?Math.round(al.currentPt/al.totalPts*100):0}%`,
+        height:'100%',background:'#06b6d4',transition:'width 0.3s'}}));
+      body.appendChild(pb);
+      body.appendChild(mkBtn('⬛ STOP SCAN',stopAutolevel,'#ef4444',{full:true}));
+    } else {
+      // Settings
+      const gs=h('div',{style:{background:C.bg+'aa',border:`1px solid ${C.border}`,
+        borderRadius:'6px',padding:'10px',marginBottom:'10px'}});
+      gs.appendChild(h('div',{style:{fontSize:'10px',fontWeight:'700',color:'#06b6d4',marginBottom:'8px',letterSpacing:'0.1em'}},'SCAN SETTINGS'));
+      // Grid size
+      const gridRow=h('div',{style:{display:'flex',gap:'6px',alignItems:'center',marginBottom:'6px'}});
+      gridRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,flex:'1'}},'Grid'));
+      gridRow.appendChild(mkNum(al.gridCols,v=>{al.gridCols=Math.max(2,Math.round(v));render();},'38px','1'));
+      gridRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'×'));
+      gridRow.appendChild(mkNum(al.gridRows,v=>{al.gridRows=Math.max(2,Math.round(v));render();},'38px','1'));
+      gridRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},`= ${al.gridCols*al.gridRows} pts`));
+      gs.appendChild(gridRow);
+      gs.appendChild(mkRow('X min → max',
+        h('div',{style:{display:'flex',gap:'4px'}},
+          mkNum(al.minX,v=>{al.minX=v;},'65px'),
+          h('span',{style:{fontSize:'10px',color:C.muted,alignSelf:'center'}},'→'),
+          mkNum(al.maxX,v=>{al.maxX=v;},'65px')),'mm'));
+      gs.appendChild(mkRow('Y min → max',
+        h('div',{style:{display:'flex',gap:'4px'}},
+          mkNum(al.minY,v=>{al.minY=v;},'65px'),
+          h('span',{style:{fontSize:'10px',color:C.muted,alignSelf:'center'}},'→'),
+          mkNum(al.maxY,v=>{al.maxY=v;},'65px')),'mm'));
+
+      // Border offset row
+      gs.appendChild(sep());
+      const offRow=h('div',{style:{display:'flex',gap:'6px',alignItems:'center',padding:'2px 0'}});
+      offRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,flex:'1'}},'Border offset'));
+      offRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'X'));
+      offRow.appendChild(mkNum(al.scanOffsetX||0,v=>{al.scanOffsetX=Math.max(0,v);},'40px'));
+      offRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'Y'));
+      offRow.appendChild(mkNum(al.scanOffsetY||0,v=>{al.scanOffsetY=Math.max(0,v);},'40px'));
+      offRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'mm'));
+      gs.appendChild(offRow);
+      // Show effective bounds if offset is active
+      const offX=al.scanOffsetX||0, offY=al.scanOffsetY||0;
+      if(offX>0||offY>0){
+        const effMinX=al.minX+offX, effMaxX=al.maxX-offX;
+        const effMinY=al.minY+offY, effMaxY=al.maxY-offY;
+        const valid=effMinX<effMaxX&&effMinY<effMaxY;
+        gs.appendChild(h('div',{style:{fontSize:'10px',
+          color:valid?'#06b6d4':'#ef4444',padding:'3px 0',lineHeight:'1.6'}},
+          valid
+            ?`↳ Scans X[${effMinX}→${effMaxX}]  Y[${effMinY}→${effMaxY}]`
+            :'⚠ Offset too large — no scan area'));
+      }
+
+      gs.appendChild(sep());
+      gs.appendChild(mkRow('Probe depth', mkNum(al.probeDepth,v=>{al.probeDepth=v;},'65px'),'mm'));
+      gs.appendChild(mkRow('Probe feed',  mkNum(al.probeFeed, v=>{al.probeFeed=v;}, '48px','1'),'mm/min'));
+      gs.appendChild(mkRow('Safe Z (AL)', mkNum(al.safeZAL,   v=>{al.safeZAL=v;},  '48px'),'mm'));
+      body.appendChild(gs);
+
+      const br2=h('div',{style:{display:'flex',gap:'6px',marginBottom:'8px'}});
+      br2.appendChild(mkBtn('📐 FROM FILE',()=>{
+        if(!app.glines.length){addLog('Load a G-code file first','err');render();return;}
+        const{minX,maxX,minY,maxY}=parseExtents(app.glines);
+        if(isFinite(minX)){al.minX=Math.floor(minX);al.maxX=Math.ceil(maxX);al.minY=Math.floor(minY);al.maxY=Math.ceil(maxY);}
+        render();
+      },'#06b6d4',{small:true}));
+      // Load saved scan JSON
+      const loadScanInput=h('input',{type:'file',accept:'.json',style:{display:'none'}});
+      loadScanInput.addEventListener('change',e=>{
+        const f=e.target.files[0]; if(!f) return;
+        const r=new FileReader();
+        r.onload=ev=>{
+          try{
+            const d=JSON.parse(ev.target.result);
+            if(!d.grid||!d.gridCols||!d.gridRows) throw new Error('Not a valid scan file');
+            Object.assign(app.autolevel,{
+              grid:d.grid, gridCols:d.gridCols, gridRows:d.gridRows,
+              minX:d.minX, maxX:d.maxX, minY:d.minY, maxY:d.maxY,
+              scanOffsetX:d.scanOffsetX||0, scanOffsetY:d.scanOffsetY||0,
+              measured:true, enabled:d.enabled||false,
+            });
+            saveAL();
+            notify('✓ Scan loaded: '+f.name,'#06b6d4');
+            render();
+          }catch(err){
+            addLog('Invalid scan file: '+err.message,'err');
+            notify('⚠ Invalid scan file','#ef4444');
+          }
+        };
+        r.readAsText(f); e.target.value='';
+      });
+      const loadScanBtn=mkBtn('📂 LOAD SCAN',()=>loadScanInput.click(),'#06b6d4',{small:true});
+      br2.appendChild(loadScanBtn);
+      br2.appendChild(loadScanInput);
+      br2.appendChild(mkBtn('▶ SCAN SURFACE',startAutolevel,'#06b6d4',{disabled:!app.connected,full:true}));
+      body.appendChild(br2);
+
+      // Height map display
+      const hmap=buildHeightMap();
+      if(hmap) body.appendChild(hmap);
+
+      if(al.measured){
+        const mapBtns=h('div',{style:{display:'flex',gap:'6px'}});
+        mapBtns.appendChild(mkBtn('💾 SAVE SCAN',()=>{
+          const data=JSON.stringify({
+            enabled:al.enabled,measured:al.measured,
+            gridCols:al.gridCols,gridRows:al.gridRows,
+            minX:al.minX,maxX:al.maxX,minY:al.minY,maxY:al.maxY,
+            grid:al.grid,
+          },null,2);
+          const blob=new Blob([data],{type:'application/json'});
+          const a=document.createElement('a');
+          a.href=URL.createObjectURL(blob);
+          a.download=`demonx-scan-${new Date().toISOString().slice(0,16).replace(/[T:]/g,'-')}.json`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          notify('✓ Scan saved','#06b6d4');
+        },'#06b6d4',{small:true,full:true}));
+        mapBtns.appendChild(mkBtn('✕ CLEAR MAP',()=>{
+          al.measured=false;al.enabled=false;al.grid=[];saveAL();render();
+        },'#ef4444',{small:true,full:true}));
+        body.appendChild(mapBtns);
+      }
+    }
+  }
+
+  // ── SPINDLE ────────────────────────────────────────────────────────────
+  if(p.id==='spindle'){
+    const rpm=(app.grbl.FS||[0,0])[1];
+    const isOn=rpm>0;
+    // Live RPM readout
+    const rpmBox=h('div',{id:'spindle-rpm-box',style:{background:C.bg,borderRadius:'6px',padding:'8px',
+      textAlign:'center',marginBottom:'10px',border:`1px solid ${isOn?'#f9731640':C.border}`}});
+    rpmBox.appendChild(h('div',{style:{fontSize:'9px',color:C.muted,marginBottom:'2px'}},'SPINDLE RPM'));
+    rpmBox.appendChild(h('div',{id:'spindle-rpm-val',style:{fontSize:'22px',fontWeight:'700',
+      color:isOn?'#f97316':C.muted,fontVariantNumeric:'tabular-nums'}},rpm+''));
+    rpmBox.appendChild(h('div',{id:'spindle-rpm-state',style:{fontSize:'10px',color:isOn?'#22c55e':'#ef4444',
+      marginTop:'2px'}},isOn?'● RUNNING':'■ STOPPED'));
+    body.appendChild(rpmBox);
+
+    // Speed input + presets
+    const speedRow=h('div',{style:{display:'flex',gap:'6px',alignItems:'center',marginBottom:'8px'}});
+    speedRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'S'));
+    const speedInp=h('input',{type:'number',value:app.spindleSpeed,min:'0',max:'30000',step:'100',
+      style:{flex:'1',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'5px 8px',fontSize:'13px',outline:'none',fontFamily:'inherit'}});
+    speedInp.addEventListener('input',e=>{app.spindleSpeed=parseInt(e.target.value)||0;});
+    speedRow.appendChild(speedInp);
+    speedRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'RPM'));
+    body.appendChild(speedRow);
+
+    // Speed presets
+    const presetRow=h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',marginBottom:'10px'}});
+    [1000,5000,10000,18000,24000].forEach(s=>{
+      presetRow.appendChild(h('button',{style:{background:'transparent',
+        border:`1px solid ${C.border}`,color:C.muted,
+        borderRadius:'4px',padding:'3px 7px',fontSize:'11px',
+        cursor:'pointer',fontFamily:'inherit'},
+        onClick:()=>{app.spindleSpeed=s;speedInp.value=s;}},s/1000+'k'));
+    });
+    body.appendChild(presetRow);
+
+    body.appendChild(sep());
+
+    // On/Off/Dir buttons
+    const btnRow=h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px',marginBottom:'8px'}});
+    // M3 CW
+    btnRow.appendChild(mkBtn('↻ CW  ON',()=>{
+      const cmd=`M3 S${app.spindleSpeed}`;
+      write(cmd);addLog(cmd,'tx');render();
+    },'#22c55e',{disabled:!app.connected}));
+    // M5 Off
+    btnRow.appendChild(mkBtn('■  OFF',()=>{
+      write('M5');addLog('M5','tx');render();
+    },'#ef4444',{disabled:!app.connected}));
+    body.appendChild(btnRow);
+
+    // Speed-only update (while already running)
+    body.appendChild(mkBtn('↑ Update Speed (M3)',()=>{
+      const cmd=`M3 S${app.spindleSpeed}`;
+      write(cmd);addLog(cmd,'tx');render();
+    },'#f97316',{full:true,disabled:!app.connected}));
+
+    body.appendChild(sep());
+    body.appendChild(h('div',{style:{fontSize:'10px',color:C.muted,lineHeight:'1.7'}},
+      'M3 = CW  ·  M4 = CCW  ·  M5 = Off\nS value sent with spindle on command.'));
+  }
+
+  // ── CONFIG ($$ viewer/editor) ──────────────────────────────────────────
+  if(p.id==='config'){
+    // ── PCB FIXTURE HOME ───────────────────────────────────────────────────
+    const pcbSection=h('div',{style:{marginBottom:'10px',padding:'8px',
+      background:'#f9731608',border:'1px solid #f9731625',borderRadius:'6px'}});
+    pcbSection.appendChild(h('div',{style:{fontSize:'10px',fontWeight:'700',
+      color:'#f97316',letterSpacing:'0.1em',marginBottom:'6px'}},'PCB FIXTURE HOME'));
+    pcbSection.appendChild(h('div',{style:{fontSize:'10px',color:C.muted,marginBottom:'6px',lineHeight:'1.6'}},
+      'Use MACHINE coords (MPos) — these never change after homing.'));
+
+    // X / Y inputs + Capture button
+    const coordRow=h('div',{style:{display:'flex',gap:'5px',alignItems:'center',marginBottom:'6px'}});
+    coordRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,width:'14px'}},'X'));
+    const xInp=h('input',{type:'number',value:app.settings.pcbHomeX,step:'0.001',
+      style:{width:'80px',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'4px',padding:'4px 6px',fontSize:'12px',outline:'none',fontFamily:'inherit'}});
+    xInp.addEventListener('input',e=>{app.settings.pcbHomeX=parseFloat(e.target.value)||0;saveSettings();});
+    coordRow.appendChild(xInp);
+    coordRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,width:'14px',marginLeft:'4px'}},'Y'));
+    const yInp=h('input',{type:'number',value:app.settings.pcbHomeY,step:'0.001',
+      style:{width:'80px',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'4px',padding:'4px 6px',fontSize:'12px',outline:'none',fontFamily:'inherit'}});
+    yInp.addEventListener('input',e=>{app.settings.pcbHomeY=parseFloat(e.target.value)||0;saveSettings();});
+    coordRow.appendChild(yInp);
+    coordRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'mm (mach)'));
+    pcbSection.appendChild(coordRow);
+
+    // Capture + enable row
+    const capRow=h('div',{style:{display:'flex',gap:'5px',alignItems:'center'}});
+    capRow.appendChild(mkBtn('📍 Capture MPos',()=>{
+      const mpos=app.grbl.MPos||[0,0,0];
+      app.settings.pcbHomeX=parseFloat(mpos[0].toFixed(3));
+      app.settings.pcbHomeY=parseFloat(mpos[1].toFixed(3));
+      app.settings.pcbHomeEnabled=true;
+      saveSettings(); render();
+      notify(`✓ PCB Home captured: X${app.settings.pcbHomeX} Y${app.settings.pcbHomeY}`,'#f97316');
+    },'#f97316',{small:true,disabled:!app.connected}));
+    // Enabled toggle
+    const enLbl=h('label',{style:{display:'flex',alignItems:'center',gap:'5px',
+      fontSize:'11px',color:C.muted,cursor:'pointer',marginLeft:'4px'}});
+    const enChk=h('input',{type:'checkbox',style:{cursor:'pointer'}});
+    enChk.checked=!!app.settings.pcbHomeEnabled;
+    enChk.addEventListener('change',e=>{app.settings.pcbHomeEnabled=e.target.checked;saveSettings();render();});
+    enLbl.appendChild(enChk);
+    enLbl.appendChild(document.createTextNode('Show PCB Home button'));
+    capRow.appendChild(enLbl);
+    pcbSection.appendChild(capRow);
+    body.appendChild(pcbSection);
+
+    // Header row — $$ loader
+    const hdr=h('div',{style:{display:'flex',gap:'6px',alignItems:'center',marginBottom:'8px'}});
+    hdr.appendChild(mkBtn(app.cfgLoading?'⟳ Loading…':'⟳ Load $$',()=>{
+      if(!app.connected){addLog('Not connected','err');return;}
+      app.cfgSettings={}; app.cfgEdits={}; app.cfgLoading=true;
+      write('$$'); addLog('$$','tx'); render();
+    },'#94a3b8',{small:true,disabled:!app.connected||app.cfgLoading}));
+    hdr.appendChild(mkBtn('✕ Clear',()=>{app.cfgSettings={};app.cfgEdits={};render();},'#64748b',{small:true}));
+    body.appendChild(hdr);
+    // FluidNC note — most runtime settings are editable, but config.yaml settings return error:162
+    body.appendChild(h('div',{style:{fontSize:'10px',color:'#64748b',marginBottom:'8px',
+      padding:'4px 6px',background:'#64748b12',borderRadius:'4px',border:'1px solid #64748b20',
+      lineHeight:'1.6'}},
+      '⚠ Settings that return error:162 are defined in config.yaml and must be edited there — they cannot be changed at runtime.'));
+
+    const keys=Object.keys(app.cfgSettings);
+    if(!keys.length){
+      body.appendChild(h('div',{style:{fontSize:'11px',color:C.muted,padding:'10px 0',textAlign:'center'}},
+        app.connected?'Click Load $$ to read FluidNC settings':'Connect to machine first'));
+    } else {
+      // Filter input
+      const filterInp=h('input',{type:'text',placeholder:'Filter settings…',
+        style:{width:'100%',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+          borderRadius:'5px',padding:'5px 8px',fontSize:'11px',outline:'none',
+          fontFamily:'inherit',marginBottom:'6px'}});
+      let filterVal='';
+      filterInp.addEventListener('input',e=>{filterVal=e.target.value.toLowerCase();renderCfg();});
+      body.appendChild(filterInp);
+
+      const cfgList=h('div',{id:'cfg-list',style:{overflowY:'auto',maxHeight:'320px'}});
+      body.appendChild(cfgList);
+
+      function renderCfg(){
+        cfgList.innerHTML='';
+        const filtered=keys.filter(k=>!filterVal||k.toLowerCase().includes(filterVal)||
+          (app.cfgSettings[k].comment||'').toLowerCase().includes(filterVal));
+        filtered.forEach(k=>{
+          const {val,comment}=app.cfgSettings[k];
+          const row=h('div',{style:{display:'flex',alignItems:'center',gap:'5px',
+            padding:'4px 2px',borderBottom:`1px solid ${C.border}20`}});
+          // Key label
+          row.appendChild(h('span',{style:{fontSize:'10px',color:'#94a3b8',width:'80px',
+            flexShrink:'0',fontWeight:'600',overflow:'hidden',textOverflow:'ellipsis',
+            whiteSpace:'nowrap'},title:k},'$'+k));
+          // Edit input
+          const inp=h('input',{type:'text',value:app.cfgEdits[k]!==undefined?app.cfgEdits[k]:val,
+            style:{flex:'1',minWidth:'0',background:C.bg,color:
+              app.cfgEdits[k]!==undefined&&app.cfgEdits[k]!==val?'#f59e0b':C.text,
+              border:`1px solid ${app.cfgEdits[k]!==undefined&&app.cfgEdits[k]!==val?'#f59e0b50':C.border}`,
+              borderRadius:'4px',padding:'3px 5px',fontSize:'11px',outline:'none',fontFamily:'inherit'}});
+          inp.addEventListener('input',e=>{
+            app.cfgEdits[k]=e.target.value;
+            inp.style.color=e.target.value!==val?'#f59e0b':C.text;
+            inp.style.borderColor=e.target.value!==val?'#f59e0b50':C.border;
+          });
+          row.appendChild(inp);
+          // Send button
+          row.appendChild(h('button',{
+            style:{background:'transparent',border:`1px solid #94a3b840`,color:'#94a3b8',
+              borderRadius:'4px',padding:'3px 6px',fontSize:'10px',cursor:'pointer',
+              fontFamily:'inherit',flexShrink:'0'},
+            onClick:()=>{
+              const nv=inp.value.trim(); if(!nv) return;
+              const cmd=`$${k}=${nv}`;
+              write(cmd); addLog(cmd,'tx');
+              app.cfgSettings[k]={val:nv,comment};
+              delete app.cfgEdits[k];
+              inp.style.color=C.text; inp.style.borderColor=C.border;
+              notify(`✓ ${cmd}`,'#94a3b8');
+            }
+          },'✓'));
+          // Comment tooltip
+          if(comment) row.appendChild(h('span',{style:{fontSize:'9px',color:C.muted,
+            maxWidth:'80px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',
+            flexShrink:'0'},title:comment},comment));
+          cfgList.appendChild(row);
+        });
+        if(!filtered.length) cfgList.appendChild(h('div',{style:{fontSize:'11px',color:C.muted,padding:'8px'}},`No match for "${filterVal}"`));
+      }
+      renderCfg();
+    }
+  }
+
+  // ── CONSOLE ────────────────────────────────────────────────────────────
+  if(p.id==='console'){
+    const logH=hasFixedH?(p.h-34-52)+'px':'130px';
+    const ld=h('div',{id:'console-log',style:{height:logH,overflow:'auto',fontSize:'11px',lineHeight:'1.7',marginBottom:'8px'}});
+    app.log.forEach(l=>{
+      ld.appendChild(h('div',{style:{color:l.k==='err'?'#ef4444':l.k==='sys'?C.muted:l.k==='tx'?'#f59e0b':'#7dd3fc'}},
+        (l.k==='tx'?'> ':'')+l.m));
+    });
+    setTimeout(()=>{ld.scrollTop=ld.scrollHeight;},0);
+    body.appendChild(ld);
+    const cr=h('div',{style:{display:'flex',gap:'6px'}});
+    const ci=h('input',{type:'text',value:app.cmdInput,
+      placeholder:app.connected?'Enter G-code or $ command…':'Connect to enable…',
+      disabled:!app.connected,
+      style:{flex:'1',background:C.bg,color:app.connected?C.text:C.muted,
+        border:`1px solid ${C.border}`,borderRadius:'5px',padding:'6px 10px',fontSize:'12px',outline:'none'}});
+    ci.addEventListener('input',e=>{app.cmdInput=e.target.value;});
+    ci.addEventListener('keydown',e=>{
+      if(e.key==='Enter'&&app.cmdInput.trim()){
+        write(app.cmdInput.trim());addLog(app.cmdInput.trim(),'tx');app.cmdInput='';renderLog();}
+    });
+    cr.appendChild(ci);
+    cr.appendChild(mkBtn('Send',()=>{
+      if(app.cmdInput.trim()){write(app.cmdInput.trim());addLog(app.cmdInput.trim(),'tx');app.cmdInput='';renderLog();}
+    },'#64748b',{small:true,disabled:!app.connected||!app.cmdInput.trim()}));
+    body.appendChild(cr);
+  }
+
+  panel.appendChild(body);
+
+  // ── RESIZE HANDLE ──────────────────────────────────────────────────────
+  const grip=document.createElement('div');
+  grip.style.cssText=`position:absolute;bottom:3px;right:3px;width:14px;height:14px;
+    cursor:se-resize;color:${p.accent};opacity:0.35;font-size:11px;line-height:14px;
+    text-align:center;pointer-events:auto;`;
+  grip.textContent='◢';
+  grip.addEventListener('mousedown',e=>{
+    app.resize=p.id;
+    app.resizeStart={x:e.clientX,y:e.clientY,w:p.w,
+      h:p.h!==null?p.h:(panel.offsetHeight||200)};
+    document.body.style.cursor='se-resize';
+    e.preventDefault();e.stopPropagation();
+  });
+  panel.appendChild(grip);
+  return panel;
+}
+
+// ── GCODE VISUALIZER ────────────────────────────────────────────────────────
+function parseGcodePaths(lines) {
+  let cx=0,cy=0,cz=0,abs=true;
+  const paths=[]; // [{type:'rapid'|'cut'|'arc', pts:[{x,y,z}]}]
+  let cur=null, curType=null;
+
+  function flush(){ if(cur&&cur.pts.length>1) paths.push(cur); cur=null; curType=null; }
+  function startSeg(type){
+    if(curType!==type){ flush(); cur={type,pts:[{x:cx,y:cy,z:cz}]}; curType=type; }
+  }
+  function extendSeg(nx,ny,nz){
+    if(!cur) return;
+    cur.pts.push({x:nx,y:ny,z:nz});
+  }
+
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+
+  for(const raw of lines){
+    const line=raw.toUpperCase().replace(/\s/g,'').split(';')[0];
+    if(!line) continue;
+    if(line.includes('G91')) abs=false;
+    if(line.includes('G90')) abs=true;
+
+    const hasMove=/[XY]/.test(line);
+    const isG0=/G0*0(?![0-9])/.test(line);
+    const isG1=/G0*1(?![0-9])/.test(line);
+    const isG2=/G0*2(?![0-9])/.test(line);
+    const isG3=/G0*3(?![0-9])/.test(line);
+
+    if(!hasMove&&!isG0&&!isG1&&!isG2&&!isG3) continue;
+
+    const xm=line.match(/X(-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
+    const ym=line.match(/Y(-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
+    const zm=line.match(/Z(-?\d+\.?\d*(?:[eE][+-]?\d+)?)/);
+
+    const nx=xm?(abs?parseFloat(xm[1]):cx+parseFloat(xm[1])):cx;
+    const ny=ym?(abs?parseFloat(ym[1]):cy+parseFloat(ym[1])):cy;
+    const nz=zm?(abs?parseFloat(zm[1]):cz+parseFloat(zm[1])):cz;
+
+    if(isG2||isG3){
+      const im=line.match(/I(-?\d+\.?\d*)/),jm=line.match(/J(-?\d+\.?\d*)/);
+      const ii=im?parseFloat(im[1]):0, jj=jm?parseFloat(jm[1]):0;
+      const arcPts=approximateArc(cx,cy,nx,ny,ii,jj,isG3);
+      startSeg('cut');
+      arcPts.forEach(pt=>{ extendSeg(pt.x,pt.y,nz); minX=Math.min(minX,pt.x);maxX=Math.max(maxX,pt.x);minY=Math.min(minY,pt.y);maxY=Math.max(maxY,pt.y); });
+    } else if(isG1){
+      startSeg('cut');
+      extendSeg(nx,ny,nz);
+    } else {
+      startSeg('rapid');
+      extendSeg(nx,ny,nz);
+    }
+    minX=Math.min(minX,nx);maxX=Math.max(maxX,nx);
+    minY=Math.min(minY,ny);maxY=Math.max(maxY,ny);
+    cx=nx; cy=ny; cz=nz;
+  }
+  flush();
+  app.vizBounds={minX:isFinite(minX)?minX:0,maxX:isFinite(maxX)?maxX:100,
+    minY:isFinite(minY)?minY:0,maxY:isFinite(maxY)?maxY:100};
+  return paths;
+}
+
+function approximateArc(x1,y1,x2,y2,i,j,ccw,segs=24){
+  const cx=x1+i, cy=y1+j;
+  const r=Math.sqrt(i*i+j*j);
+  let a1=Math.atan2(y1-cy,x1-cx);
+  let a2=Math.atan2(y2-cy,x2-cx);
+  if(ccw){ if(a2<a1) a2+=Math.PI*2; }
+  else   { if(a2>a1) a2-=Math.PI*2; }
+  const pts=[];
+  for(let s=1;s<=segs;s++){
+    const t=s/segs, a=a1+(a2-a1)*t;
+    pts.push({x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)});
+  }
+  return pts;
+}
+
+function drawVisualizer(canvas, paths, bounds, progress){
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width, H=canvas.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle=C.bg;
+  ctx.fillRect(0,0,W,H);
+
+  if(!paths||!paths.length){
+    ctx.fillStyle='#4a5a6a'; ctx.font='12px monospace'; ctx.textAlign='center';
+    ctx.fillText('Load a G-code file to preview',W/2,H/2);
+    return;
+  }
+
+  const pad=20;
+  const rngX=bounds.maxX-bounds.minX||1;
+  const rngY=bounds.maxY-bounds.minY||1;
+
+  // Compute base scale to fit whole job with padding
+  const baseScaleX=(W-pad*2)/rngX;
+  const baseScaleY=(H-pad*2)/rngY;
+  const baseScale=Math.min(baseScaleX,baseScaleY);
+
+  // Auto-fit once when a new file loads
+  if(!app.vizFitted){
+    app.vizZoom=1;
+    app.vizPanX=(W-pad*2-rngX*baseScale)/2 + pad - bounds.minX*baseScale;
+    app.vizPanY=(H-pad*2-rngY*baseScale)/2 + pad + bounds.maxY*baseScale;
+    app.vizFitted=true;
+  }
+
+  const scale=baseScale*app.vizZoom;
+  const offX=app.vizPanX;
+  const offY=app.vizPanY;
+
+  function tx(x){ return offX+x*scale; }
+  function ty(y){ return offY-y*scale; }
+
+  // World-to-canvas for bounds checking
+  const x0=tx(bounds.minX)-20, x1=tx(bounds.maxX)+20;
+  const y0=ty(bounds.maxY)-20, y1=ty(bounds.minY)+20;
+
+  // Grid — subtle, theme-aware
+  const gridAlpha=currentTheme==='light'?'18':'12';
+  ctx.strokeStyle=currentTheme==='light'?`rgba(100,120,150,0.12)`:`rgba(100,140,200,0.1)`;
+  ctx.lineWidth=0.5;
+  const rawStep=rngX/(4*app.vizZoom);
+  const gridStep=Math.pow(10,Math.floor(Math.log10(Math.max(rawStep,0.001))));
+  const gStart=Math.max(bounds.minX-gridStep, bounds.minX-gridStep);
+  for(let gx=Math.floor(bounds.minX/gridStep)*gridStep; gx<=bounds.maxX+gridStep; gx+=gridStep){
+    const sx=tx(gx); if(sx<-5||sx>W+5) continue;
+    ctx.beginPath();ctx.moveTo(sx,0);ctx.lineTo(sx,H);ctx.stroke();
+  }
+  for(let gy=Math.floor(bounds.minY/gridStep)*gridStep; gy<=bounds.maxY+gridStep; gy+=gridStep){
+    const sy=ty(gy); if(sy<-5||sy>H+5) continue;
+    ctx.beginPath();ctx.moveTo(0,sy);ctx.lineTo(W,sy);ctx.stroke();
+  }
+
+  // Paths — calculate progress cutoff
+  let totalPts=0; paths.forEach(s=>totalPts+=s.pts.length);
+  const donePts=Math.round(progress/100*totalPts);
+  let countedPts=0;
+
+  for(const seg of paths){
+    const isRapid=seg.type==='rapid';
+    const segStart=countedPts;
+    countedPts+=seg.pts.length;
+    const isPast=donePts>=countedPts;
+    const isPartial=!isPast&&donePts>segStart;
+
+    ctx.strokeStyle=isRapid
+      ? (isPast?'#1e4a6a':'#1e3a5a')
+      : (isPast?'#22c55e':'#818cf8');
+    ctx.lineWidth=isRapid?0.6:1.2;
+    ctx.setLineDash(isRapid?[3,3]:[]);
+
+    const drawTo=isPartial?donePts-segStart:seg.pts.length;
+    ctx.beginPath();
+    ctx.moveTo(tx(seg.pts[0].x),ty(seg.pts[0].y));
+    for(let i=1;i<drawTo;i++) ctx.lineTo(tx(seg.pts[i].x),ty(seg.pts[i].y));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Tool position dot
+  const mpos=app.grbl.MPos||[0,0,0];
+  const wco=app.grbl.WCO||[0,0,0];
+  const wx=mpos[0]-wco[0], wy=mpos[1]-wco[1];
+  if(app.connected){
+    const ptx=tx(wx), pty=ty(wy);
+    ctx.beginPath(); ctx.arc(ptx,pty,6,0,Math.PI*2);
+    ctx.fillStyle='#ef4444'; ctx.fill();
+    ctx.beginPath(); ctx.arc(ptx,pty,10,0,Math.PI*2);
+    ctx.strokeStyle='#ef444460'; ctx.lineWidth=1; ctx.stroke();
+    ctx.strokeStyle='#ef444430'; ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.moveTo(ptx,0);ctx.lineTo(ptx,H);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,pty);ctx.lineTo(W,pty);ctx.stroke();
+  }
+
+  // Work origin dot
+  ctx.beginPath(); ctx.arc(tx(0),ty(0),4,0,Math.PI*2);
+  ctx.fillStyle='#f59e0b'; ctx.fill();
+
+  // Axis labels — current zoom-aware grid step
+  ctx.fillStyle='#4a5a6a'; ctx.font='9px monospace';
+  ctx.textAlign='left';
+  ctx.fillText(`X${bounds.minX.toFixed(1)} Y${bounds.minY.toFixed(1)}`,4,H-4);
+  ctx.textAlign='right';
+  ctx.fillText(`${(rngX).toFixed(1)}×${(rngY).toFixed(1)}mm  ${app.vizZoom.toFixed(1)}×`,W-4,H-4);
+}
+
+function buildVisualizerPanel(p){
+  const hasH=p.h!==null&&p.h!==undefined;
+  const isCollapsed=!!p.collapsed;
+  const panel=h('div',{style:{
+    position:'absolute',left:p.x+'px',top:p.y+'px',width:p.w+'px',
+    ...(hasH&&!isCollapsed?{height:p.h+'px'}:{}),
+    background:C.surface,border:`1px solid ${p.accent}22`,borderRadius:'8px',
+    boxShadow:'0 8px 32px rgba(0,0,0,0.5)',...(!isCollapsed?{overflow:'hidden'}:{})}});
+
+  const tb=h('div',{
+    style:{background:`${p.accent}14`,borderBottom:`1px solid ${p.accent}28`,
+      padding:'7px 12px',cursor:'grab',display:'flex',alignItems:'center',
+      justifyContent:'space-between',flexShrink:'0',
+      borderRadius:isCollapsed?'8px':'8px 8px 0 0'},
+    onMousedown:e=>{
+      app.drag=p.id;
+      app.dragOff={x:e.clientX-p.x,y:e.clientY-p.y};
+      document.body.style.cursor='grabbing';
+      e.preventDefault();
+    }
+  },
+    h('span',{style:{fontSize:'10px',fontWeight:'700',color:p.accent,letterSpacing:'0.12em',pointerEvents:'none'}},p.title),
+    h('div',{style:{display:'flex',gap:'6px',alignItems:'center'}},
+      h('span',{style:{color:`${p.accent}50`,fontSize:'10px',pointerEvents:'none'}},
+        isCollapsed?'':' scroll=zoom  drag=pan'),
+      h('button',{
+        style:{background:'transparent',border:'none',color:`${p.accent}80`,
+          fontSize:'14px',lineHeight:'1',cursor:'pointer',padding:'0 2px',fontFamily:'inherit'},
+        onMousedown:e=>e.stopPropagation(),
+        onClick:e=>{
+          e.stopPropagation();
+          const i=app.panels.findIndex(q=>q.id===p.id);
+          if(i>=0){app.panels[i]={...app.panels[i],collapsed:!app.panels[i].collapsed};savePanels();render();}
+        }
+      },isCollapsed?'▶':'▼')
+    )
+  );
+  panel.appendChild(tb);
+  if(isCollapsed) return panel;
+
+  const infoH=20;
+  const canH=hasH ? Math.max(80, p.h-34-infoH) : Math.round(p.w*0.75);
+  const canvas=document.createElement('canvas');
+  canvas.id='viz-canvas';
+  canvas.style.cssText=`display:block;width:100%;height:${canH}px;cursor:crosshair;`;
+
+  // ── Wheel zoom ────────────────────────────────────────────────────────
+  canvas.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    // Convert mouse position to world coords before zoom
+    const scaleOld=(Math.min((canvas.width-40)/(app.vizBounds.maxX-app.vizBounds.minX||1),
+                              (canvas.height-40)/(app.vizBounds.maxY-app.vizBounds.minY||1)))*app.vizZoom;
+    const wx=(mx-app.vizPanX)/scaleOld;
+    const wy=(app.vizPanY-my)/scaleOld;
+
+    const factor=e.deltaY<0?1.15:1/1.15;
+    app.vizZoom=Math.max(0.3,Math.min(100,app.vizZoom*factor));
+
+    const scaleNew=(Math.min((canvas.width-40)/(app.vizBounds.maxX-app.vizBounds.minX||1),
+                              (canvas.height-40)/(app.vizBounds.maxY-app.vizBounds.minY||1)))*app.vizZoom;
+    // Adjust pan so point under mouse stays fixed
+    app.vizPanX=mx-wx*scaleNew;
+    app.vizPanY=my+wy*scaleNew;
+
+    drawVisualizer(canvas, app.vizPaths, app.vizBounds, app.progress);
+  },{passive:false});
+
+  // ── Canvas pan (middle mouse or left drag inside canvas) ──────────────
+  let isPanning=false, panStart={x:0,y:0}, panOrigin={x:0,y:0};
+  canvas.addEventListener('mousedown',e=>{
+    // Left click inside canvas = pan (but don't interfere with panel drag on titlebar)
+    if(e.button===0||e.button===1){
+      isPanning=true;
+      panStart={x:e.clientX,y:e.clientY};
+      panOrigin={x:app.vizPanX,y:app.vizPanY};
+      canvas.style.cursor='grabbing';
+      e.stopPropagation(); // don't start panel drag
+    }
+  });
+  document.addEventListener('mousemove', e=>{
+    if(!isPanning) return;
+    app.vizPanX=panOrigin.x+(e.clientX-panStart.x);
+    app.vizPanY=panOrigin.y+(e.clientY-panStart.y);
+    drawVisualizer(canvas, app.vizPaths, app.vizBounds, app.progress);
+  });
+  document.addEventListener('mouseup', e=>{
+    if(isPanning){ isPanning=false; canvas.style.cursor='crosshair'; }
+  });
+
+  panel.appendChild(canvas);
+
+  // Info bar
+  const info=h('div',{style:{padding:'3px 10px',fontSize:'9px',color:C.muted,
+    display:'flex',gap:'12px',borderTop:`1px solid ${C.border}`,
+    background:C.bg,flexShrink:'0',height:infoH+'px',alignItems:'center'}});
+  const mpos=app.grbl.MPos||[0,0,0];
+  const wco=app.grbl.WCO||[0,0,0];
+  info.appendChild(h('span',{},`W: X${(mpos[0]-wco[0]).toFixed(2)} Y${(mpos[1]-wco[1]).toFixed(2)}`));
+  if(app.vizPaths.length){
+    const b=app.vizBounds;
+    info.appendChild(h('span',{},`${(b.maxX-b.minX).toFixed(1)}×${(b.maxY-b.minY).toFixed(1)}mm`));
+    info.appendChild(h('span',{style:{color:'#818cf8'}},`${app.vizPaths.filter(s=>s.type==='cut').length} cuts`));
+    info.appendChild(h('span',{style:{color:app.autolevel.enabled&&app.autolevel.measured?'#06b6d4':C.muted}},
+      app.autolevel.enabled&&app.autolevel.measured?'AL ✓':'AL off'));
+  }
+  // Fit button
+  const fitBtn=h('button',{style:{marginLeft:'auto',background:'transparent',
+    border:`1px solid ${p.accent}40`,color:p.accent,borderRadius:'4px',
+    padding:'1px 7px',fontSize:'9px',cursor:'pointer',fontFamily:'inherit'},
+    onClick:()=>{ app.vizFitted=false; drawVisualizer(canvas, app.vizPaths, app.vizBounds, app.progress); }
+  },'⊡ fit');
+  info.appendChild(fitBtn);
+  panel.appendChild(info);
+
+  // Resize grip
+  const grip=h('div',{style:{position:'absolute',bottom:'3px',right:'3px',
+    width:'14px',height:'14px',cursor:'se-resize',color:p.accent,opacity:'0.35',
+    fontSize:'11px',lineHeight:'14px',textAlign:'center',pointerEvents:'auto'}},'◢');
+  grip.addEventListener('mousedown',e=>{
+    app.resize=p.id;
+    app.resizeStart={x:e.clientX,y:e.clientY,w:p.w,h:p.h!==null?p.h:(panel.offsetHeight||300)};
+    document.body.style.cursor='se-resize';
+    e.preventDefault(); e.stopPropagation();
+  });
+  panel.appendChild(grip);
+
+  // Draw after DOM layout so offsetWidth is real
+  requestAnimationFrame(()=>{
+    canvas.width=canvas.offsetWidth||p.w;
+    canvas.height=canH;
+    drawVisualizer(canvas, app.vizPaths, app.vizBounds, app.progress);
+  });
+
+  return panel;
+}
+
+function buildCamPanel(p){
+  const hasH=p.h!==null&&p.h!==undefined;
+  const isCollapsed=!!p.collapsed;
+  const panel=h('div',{style:{
+    position:'absolute',left:p.x+'px',top:p.y+'px',width:p.w+'px',
+    ...(hasH&&!isCollapsed?{height:p.h+'px'}:{}),
+    background:C.surface,border:`1px solid ${p.accent}22`,borderRadius:'8px',
+    boxShadow:'0 8px 32px rgba(0,0,0,0.5)',...(!isCollapsed?{overflow:'hidden'}:{})}});
+
+  const tb=h('div',{
+    style:{background:`${p.accent}14`,borderBottom:`1px solid ${p.accent}28`,
+      padding:'7px 12px',cursor:'grab',display:'flex',alignItems:'center',
+      justifyContent:'space-between',flexShrink:'0',
+      borderRadius:isCollapsed?'8px':'8px 8px 0 0'},
+    onMousedown:e=>{
+      app.drag=p.id;app.dragOff={x:e.clientX-p.x,y:e.clientY-p.y};
+      document.body.style.cursor='grabbing';e.preventDefault();
+    }
+  },
+    h('span',{style:{fontSize:'10px',fontWeight:'700',color:p.accent,letterSpacing:'0.12em',pointerEvents:'none'}},p.title),
+    h('div',{style:{display:'flex',gap:'6px',alignItems:'center'}},
+      h('button',{
+        style:{background:'transparent',border:'none',color:`${p.accent}80`,
+          fontSize:'14px',lineHeight:'1',cursor:'pointer',padding:'0 2px',fontFamily:'inherit'},
+        onMousedown:e=>e.stopPropagation(),
+        onClick:e=>{
+          e.stopPropagation();
+          const i=app.panels.findIndex(q=>q.id===p.id);
+          if(i>=0){app.panels[i]={...app.panels[i],collapsed:!app.panels[i].collapsed};savePanels();render();}
+        }
+      },isCollapsed?'▶':'▼'),
+      h('span',{style:{color:`${p.accent}50`,fontSize:'12px',pointerEvents:'none'}},'⣿')
+    )
+  );
+  panel.appendChild(tb);
+  if(isCollapsed) return panel;
+
+  const body=h('div',{style:{padding:'10px',display:'flex',flexDirection:'column',gap:'6px',
+    height:hasH?`calc(100% - 34px)`:undefined,overflow:'auto'}});
+
+  const isServerMode = app.transport==='websocket';
+
+  if(isServerMode){
+    // RTSP mode via server proxy
+    body.appendChild(h('div',{style:{fontSize:'10px',fontWeight:'700',color:'#f472b6',marginBottom:'2px',letterSpacing:'0.1em'}},'REOLINK RTSP STREAM'));
+
+    // RTSP URL
+    const urlInp=h('input',{type:'text',value:app.camRtspUrl,
+      placeholder:'192.168.1.x  (IP only or full rtsp:// URL)',
+      style:{width:'100%',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'5px 8px',fontSize:'11px',outline:'none',marginBottom:'4px'}});
+    urlInp.addEventListener('input',e=>{app.camRtspUrl=e.target.value;});
+    body.appendChild(urlInp);
+
+    // User/pass row
+    const credRow=h('div',{style:{display:'flex',gap:'5px',marginBottom:'4px'}});
+    const userInp=h('input',{type:'text',value:app.camRtspUser,placeholder:'Username',
+      style:{flex:'1',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'5px 8px',fontSize:'11px',outline:'none'}});
+    userInp.addEventListener('input',e=>{app.camRtspUser=e.target.value;});
+    const passInp=h('input',{type:'password',value:app.camRtspPass,placeholder:'Password',
+      style:{flex:'1',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'5px 8px',fontSize:'11px',outline:'none'}});
+    passInp.addEventListener('input',e=>{app.camRtspPass=e.target.value;});
+    credRow.appendChild(userInp); credRow.appendChild(passInp);
+    body.appendChild(credRow);
+
+    // Channel/quality presets for Reolink
+    const presets=h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',marginBottom:'6px'}});
+    body.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'Reolink stream path:'));
+    [
+      {l:'Main (1080p)',  v:'/h264Preview_01_main'},
+      {l:'Sub (480p)',    v:'/h264Preview_01_sub'},
+    ].forEach(({l,v})=>{
+      presets.appendChild(h('button',{style:{background:'transparent',border:`1px solid #f472b630`,
+        color:'#f472b680',borderRadius:'4px',padding:'2px 7px',fontSize:'10px',
+        cursor:'pointer',fontFamily:'inherit'},
+        onClick:()=>{
+          // Store the path; the full URL is constructed on Load
+          app._reolinkPath=v; render();
+        }},l));
+    });
+    body.appendChild(presets);
+
+    body.appendChild(mkBtn('▶  LOAD STREAM',()=>{
+      let base=app.camRtspUrl.trim();
+      if(!base){addLog('Enter cam IP or URL','err');render();return;}
+      const user=app.camRtspUser.trim();
+      const pass=app.camRtspPass.trim();
+      const cred=(user&&pass)?`${encodeURIComponent(user)}:${encodeURIComponent(pass)}@`:'';
+
+      if(base.startsWith('rtsp://')){
+        // Full URL entered — inject credentials if provided and not already present
+        if(cred && !base.includes('@')){
+          base=base.replace('rtsp://','rtsp://'+cred);
+        }
+      } else {
+        // IP-only entered — build full URL
+        const path=app._reolinkPath||'/h264Preview_01_sub';
+        base=`rtsp://${cred}${base}:554${path}`;
+      }
+      addLog(`Connecting cam: ${base.replace(/:[^@]+@/,':***@')}`,'sys');
+      app.camProxyUrl=`/cam/proxy?url=${encodeURIComponent(base)}`;
+      app.camError=false;
+      // Persist cam settings
+      try{ localStorage.setItem(LS.cam, JSON.stringify({
+        url:app.camRtspUrl.trim(), user:app.camRtspUser.trim(),
+        pass:app.camRtspPass.trim(), path:app._reolinkPath||'/h264Preview_01_sub'
+      })); }catch(_){}
+      render();
+    },'#f472b6',{full:true}));
+
+  } else {
+    // Local/direct MJPEG URL fallback
+    body.appendChild(h('div',{style:{fontSize:'10px',color:'#f59e0b',marginBottom:'4px',
+      padding:'6px',background:'#f59e0b10',border:'1px solid #f59e0b30',borderRadius:'5px'}},'⚠ RTSP requires server mode (start.bat). Direct MJPEG URL only in local mode.'));
+    const urlRow=h('div',{style:{display:'flex',gap:'6px',marginBottom:'4px'}});
+    const urlInp2=h('input',{type:'text',value:app.camProxyUrl,
+      placeholder:'http://cam-ip/mjpeg  or  /stream',
+      style:{flex:'1',background:C.bg,color:C.text,border:`1px solid ${C.border}`,
+        borderRadius:'5px',padding:'5px 8px',fontSize:'11px',outline:'none'}});
+    urlInp2.addEventListener('input',e=>{app.camProxyUrl=e.target.value;});
+    urlRow.appendChild(urlInp2);
+    urlRow.appendChild(mkBtn('Load',()=>{app.camError=false;render();},'#f472b6',{small:true}));
+    body.appendChild(urlRow);
+  }
+
+  // Stream display
+  const streamH=hasH?Math.max(80,p.h-34-130):120;
+  const streamWrap=h('div',{style:{flex:'1',background:C.bg,borderRadius:'6px',
+    overflow:'hidden',position:'relative',minHeight:streamH+'px',
+    display:'flex',alignItems:'center',justifyContent:'center'}});
+
+  if(app.camProxyUrl&&!app.camError){
+    const img=h('img',{src:app.camProxyUrl,
+      style:{width:'100%',height:'100%',objectFit:'contain',display:'block'}});
+    img.addEventListener('error',()=>{app.camError=true;render();});
+    streamWrap.appendChild(img);
+    // OSD overlay
+    const ov=h('div',{style:{position:'absolute',top:'6px',left:'6px',
+      background:'rgba(0,0,0,0.65)',borderRadius:'4px',padding:'3px 8px',
+      fontSize:'10px',color:'#c8d4e4',pointerEvents:'none',fontFamily:'monospace'}});
+    const sc=STATE_COLOR[app.grbl.state]||'#334155';
+    const mpos=app.grbl.MPos||[0,0,0],wco=app.grbl.WCO||[0,0,0];
+    ov.innerHTML=`<span style="color:${sc};font-weight:700">${app.grbl.state}</span>  `+
+      `X${(mpos[0]-wco[0]).toFixed(2)} Y${(mpos[1]-wco[1]).toFixed(2)} Z${(mpos[2]-wco[2]).toFixed(2)}`;
+    streamWrap.appendChild(ov);
+    // Stop button
+    const stopCam=h('button',{style:{position:'absolute',top:'6px',right:'6px',
+      background:'rgba(0,0,0,0.65)',border:'1px solid #ef444460',color:'#ef4444',
+      borderRadius:'4px',padding:'2px 7px',fontSize:'10px',cursor:'pointer',fontFamily:'inherit'},
+      onClick:()=>{app.camProxyUrl='';app.camError=false;render();}
+    },'✕');
+    streamWrap.appendChild(stopCam);
+  } else if(app.camError){
+    streamWrap.appendChild(h('div',{style:{textAlign:'center',color:'#ef4444',
+      fontSize:'11px',padding:'16px',lineHeight:'1.8'}},
+      '⚠ Stream error\n'+
+      (isServerMode?'Check IP, credentials, and ffmpeg in PATH':'Check URL and CORS')));
+  } else {
+    const ph=h('div',{style:{textAlign:'center',color:C.muted,fontSize:'11px',lineHeight:'2'}});
+    ph.innerHTML='📷 No stream<br><span style="font-size:10px">'+
+      (isServerMode?'Enter Reolink IP + credentials above':'Enter MJPEG URL above')+'</span>';
+    streamWrap.appendChild(ph);
+  }
+  body.appendChild(streamWrap);
+  panel.appendChild(body);
+
+  // Resize grip
+  const grip=h('div',{style:{position:'absolute',bottom:'3px',right:'3px',
+    width:'14px',height:'14px',cursor:'se-resize',color:p.accent,opacity:'0.35',
+    fontSize:'11px',lineHeight:'14px',textAlign:'center',pointerEvents:'auto'}},'◢');
+  grip.addEventListener('mousedown',e=>{
+    app.resize=p.id;
+    app.resizeStart={x:e.clientX,y:e.clientY,w:p.w,h:p.h!==null?p.h:(panel.offsetHeight||280)};
+    document.body.style.cursor='se-resize';e.preventDefault();e.stopPropagation();
+  });
+  panel.appendChild(grip);
+  return panel;
+}
+
+// ── PARTIAL RENDERS (no DOM rebuild — prevents input flicker) ────────────────
+function renderLive(){
+  // Update status coords in-place
+  const mpos=app.grbl.MPos||[0,0,0];
+  const wco=app.grbl.WCO||[0,0,0];
+  const wpos=mpos.map((v,i)=>v-wco[i]);
+  const sc=STATE_COLOR[app.grbl.state]||'#334155';
+  const feed=(app.grbl.FS||[0,0])[0], rpm=(app.grbl.FS||[0,0])[1];
+  ['wx','wy','wz'].forEach((id,i)=>{
+    const el=document.getElementById(id); if(el) el.textContent=wpos[i].toFixed(3);
+  });
+  ['mx','my','mz'].forEach((id,i)=>{
+    const el=document.getElementById(id); if(el) el.textContent=mpos[i].toFixed(3);
+  });
+  const stateEl=document.getElementById('grbl-state');
+  if(stateEl){ stateEl.textContent=app.grbl.state; stateEl.style.color=sc; }
+  const feedEl=document.getElementById('grbl-feed');
+  if(feedEl) feedEl.textContent=feed;
+  const rpmEl=document.getElementById('grbl-rpm');
+  if(rpmEl) rpmEl.textContent=rpm;
+  // Update spindle panel live RPM
+  const sRpmEl=document.getElementById('spindle-rpm-val');
+  if(sRpmEl){ sRpmEl.textContent=rpm+''; sRpmEl.style.color=rpm>0?'#f97316':C.muted; }
+  const sRpmState=document.getElementById('spindle-rpm-state');
+  if(sRpmState){ sRpmState.textContent=rpm>0?'● RUNNING':'■ STOPPED'; sRpmState.style.color=rpm>0?'#22c55e':'#ef4444'; }
+  const sRpmBox=document.getElementById('spindle-rpm-box');
+  if(sRpmBox) sRpmBox.style.borderColor=rpm>0?'#f9731640':C.border;
+  const ovEl=document.getElementById('ov-label');
+  if(ovEl){
+    const ov=app.grbl.Ov||[100,100,100];
+    ovEl.textContent=`OVERRIDES  ·  F:${ov[0]}%  R:${ov[1]}%  S:${ov[2]}%`;
+  }
+  // Update topbar state dot + text
+  const dot=document.getElementById('state-dot');
+  if(dot) dot.style.background=sc;
+  const stateTop=document.getElementById('state-top');
+  if(stateTop){ stateTop.textContent=app.grbl.state.toUpperCase(); stateTop.style.color=sc; }
+  const feedTop=document.getElementById('feed-top');
+  if(feedTop) feedTop.textContent=`F: ${feed}   S: ${rpm}`;
+  // Update Pn (pin state) indicator
+  const pnEl=document.getElementById('pn-indicator');
+  const pn=app.grbl.Pn||'';
+  if(pnEl){
+    pnEl.textContent=pn?`Pn:${pn}`:'';
+    pnEl.style.color=pn.includes('P')?'#22c55e':pn.length?'#ef4444':C.muted;
+    pnEl.style.display=pn?'inline':'none';
+  }
+  const vizCanvas=document.getElementById('viz-canvas');
+  if(vizCanvas&&app.vizPaths.length){
+    drawVisualizer(vizCanvas, app.vizPaths, app.vizBounds, app.progress);
+  }
+}
+
+function renderLog(){
+  // Only update console log area, don't rebuild DOM
+  const ld=document.getElementById('console-log');
+  if(!ld) return;
+  ld.innerHTML='';
+  app.log.forEach(l=>{
+    const d=document.createElement('div');
+    d.style.color=l.k==='err'?'#ef4444':l.k==='sys'?C.muted:l.k==='tx'?'#f59e0b':'#7dd3fc';
+    d.textContent=(l.k==='tx'?'> ':'')+l.m;
+    ld.appendChild(d);
+  });
+  ld.scrollTop=ld.scrollHeight;
+}
+
+// ── RENDER ──────────────────────────────────────────────────────────────────
+function render(){
+  const root=document.getElementById('root');
+  root.innerHTML='';
+  root.style.color=C.text;
+  const sc=STATE_COLOR[app.grbl.state]||'#334155';
+  const feed=(app.grbl.FS||[0,0])[0],rpm=(app.grbl.FS||[0,0])[1];
+
+  // Top bar with PGC branding
+  const tb=h('div',{style:{position:'fixed',top:'0',left:'0',right:'0',height:'48px',
+    background:currentTheme==='dark'
+      ? 'linear-gradient(90deg,rgba(7,10,15,0.97),rgba(11,18,26,0.97))'
+      : 'linear-gradient(90deg,rgba(208,218,232,0.97),rgba(216,230,240,0.97))',
+    borderBottom:`1px solid rgba(52,209,198,0.22)`,
+    boxShadow:'0 2px 20px rgba(52,209,198,0.08)',
+    display:'flex',alignItems:'center',padding:'0 14px',gap:'10px',zIndex:'999'}});
+
+  // PGC Logo
+  const logoWrap=h('a',{href:'https://www.PricklyGuy.com',target:'_blank',
+    style:{display:'flex',alignItems:'center',gap:'8px',textDecoration:'none',
+      padding:'3px 8px 3px 3px',borderRadius:'999px',
+      background:'rgba(52,209,198,0.06)',border:'1px solid rgba(52,209,198,0.18)',
+      backdropFilter:'blur(8px)'}});
+  const logoImg=h('img',{src:PGC_LOGO_URL,alt:'PGC',
+    style:{width:'34px',height:'34px',borderRadius:'50%',display:'block',
+      boxShadow:'0 0 10px rgba(52,209,198,0.4)'}});
+  logoImg.onerror=()=>{ logoImg.style.display='none'; };
+  logoWrap.appendChild(logoImg);
+  logoWrap.appendChild(h('span',{style:{fontSize:'10px',fontWeight:'700',
+    color:'rgba(52,209,198,0.9)',letterSpacing:'0.08em',whiteSpace:'nowrap'}},'DEMONX'));
+  tb.appendChild(logoWrap);
+
+  tb.appendChild(h('div',{style:{width:'1px',height:'24px',background:'rgba(52,209,198,0.2)'}}));
+  const stateDot=h('div',{id:'state-dot',style:{width:'8px',height:'8px',borderRadius:'50%',background:sc}});
+  tb.appendChild(stateDot);
+  const stateLabel=h('span',{id:'state-top',style:{fontSize:'11px',fontWeight:'700',color:sc,letterSpacing:'0.1em'}},app.grbl.state.toUpperCase());
+  tb.appendChild(stateLabel);
+  tb.appendChild(h('div',{style:{width:'1px',height:'20px',background:'rgba(52,209,198,0.15)'}}));
+  tb.appendChild(mkBtn('⌂ HOME',()=>{app.homing=true;write('$H');addLog('$H','tx');},'#06b6d4',{small:true,disabled:!app.connected}));
+  tb.appendChild(mkBtn('🔓 UNLOCK',()=>{write('$X');addLog('$X','tx');render();},'#a855f7',{small:true,disabled:!app.connected}));
+  if(app.connected&&app.sending) tb.appendChild(h('span',{style:{fontSize:'10px',color:'#a855f7'}},`▶ ${app.progress}%`));
+  if(app.connected&&app.autolevel.enabled&&app.autolevel.measured)
+    tb.appendChild(h('span',{style:{fontSize:'10px',color:'#06b6d4'}},'⬛ AL'));
+  // Live pin state indicator
+  const pn=app.grbl.Pn||'';
+  const pnSpan=h('span',{id:'pn-indicator',style:{
+    fontSize:'10px',fontWeight:'700',display:pn?'inline':'none',
+    color:pn.includes('P')?'#22c55e':pn.length?'#ef4444':C.muted,
+    background:pn.includes('P')?'rgba(34,197,94,0.12)':'rgba(239,68,68,0.12)',
+    border:`1px solid ${pn.includes('P')?'rgba(34,197,94,0.3)':'rgba(239,68,68,0.3)'}`,
+    borderRadius:'4px',padding:'2px 6px',
+  }},pn?`Pn:${pn}`:'');
+  tb.appendChild(pnSpan);
+  tb.appendChild(h('div',{style:{flex:'1'}}));
+  // HOLD / RESUME / RESET grouped right
+  tb.appendChild(mkBtn('⏸ HOLD',()=>write('!',true),'#f59e0b',{small:true,disabled:!app.connected}));
+  tb.appendChild(mkBtn('▶ RESUME',()=>write('~',true),'#22c55e',{small:true,disabled:!app.connected}));
+  tb.appendChild(mkBtn('⚠ RESET',()=>{write('\x18',true);app.okQueue=[];addLog('⚠ RESET','err');render();},'#ef4444',{small:true,disabled:!app.connected}));
+  tb.appendChild(h('div',{style:{width:'1px',height:'20px',background:'rgba(52,209,198,0.15)',margin:'0 4px'}}));
+  tb.appendChild(h('span',{id:'feed-top',style:{fontSize:'10px',color:C.muted}},`F: ${feed}   S: ${rpm}`));
+  const themeBtn=h('button',{style:{background:'transparent',border:`1px solid rgba(52,209,198,0.25)`,
+    color:'rgba(52,209,198,0.7)',borderRadius:'4px',padding:'3px 8px',fontSize:'12px',
+    cursor:'pointer',fontFamily:'inherit',marginLeft:'6px'},
+    onClick:()=>{ applyTheme(currentTheme==='dark'?'light':'dark'); render(); }
+  }, currentTheme==='dark'?'☀':'🌙');
+  tb.appendChild(themeBtn);
+  const rl=h('button',{style:{background:'transparent',border:`1px solid rgba(52,209,198,0.2)`,
+    color:C.muted,borderRadius:'4px',padding:'3px 8px',fontSize:'10px',
+    cursor:'pointer',fontFamily:'inherit',marginLeft:'4px'},
+    onClick:()=>{app.panels=DEF_PANELS.map(p=>({...p}));savePanels();render();}
+  },'⊞ reset');
+  tb.appendChild(rl);
+  root.appendChild(tb);
+
+  // PGC footer
+  let footer=document.getElementById('pgc-footer');
+  if(!footer){
+    footer=document.createElement('div');
+    footer.id='pgc-footer';
+    footer.style.cssText=`position:fixed;left:0;right:0;bottom:0;z-index:9998;
+      padding:6px 14px;font-size:11px;display:flex;align-items:center;
+      justify-content:center;gap:8px;pointer-events:none;
+      background:${currentTheme==='dark'?'rgba(7,10,15,0.85)':'rgba(208,218,232,0.9)'};
+      border-top:1px solid rgba(52,209,198,0.18);backdrop-filter:blur(8px);`;
+    footer.innerHTML=`<span style="color:rgba(52,209,198,0.6);font-size:10px">Powered by</span>
+      <a href="https://www.PricklyGuy.com" target="_blank"
+        style="color:rgba(52,209,198,0.9);text-decoration:none;font-weight:700;
+        font-size:10px;pointer-events:auto;">Prickly Guy Creations</a>
+      <span style="color:rgba(52,209,198,0.3)">·</span>
+      <span style="color:rgba(52,209,198,0.5);font-size:10px">DemonX CNC Controller</span>`;
+    document.body.appendChild(footer);
+  }
+
+  // Toast
+  if(app.notification){
+    root.appendChild(h('div',{style:{position:'absolute',top:'48px',right:'16px',zIndex:'9999',
+      background:`${app.notification.color}18`,border:`1px solid ${app.notification.color}55`,
+      borderRadius:'8px',padding:'10px 16px',fontSize:'12px',
+      color:app.notification.color,fontWeight:'700',maxWidth:'380px'}},app.notification.msg));
+  }
+
+  // Canvas — scrollable so panels below viewport are reachable
+  const maxY=app.panels.reduce((m,p)=>Math.max(m,(p.y||0)+(p.h||600)),0)+80;
+  const canvas=h('div',{style:{position:'absolute',top:'48px',left:'0',right:'0',
+    height:`${maxY}px`, minHeight:'calc(100vh - 48px)', overflow:'visible'}});
+  app.panels.forEach(p=>{
+    if(p.id==='visualizer') canvas.appendChild(buildVisualizerPanel(p));
+    else if(p.id==='ipcam') canvas.appendChild(buildCamPanel(p));
+    else canvas.appendChild(buildPanel(p));
+  });
+  root.appendChild(canvas);
+  // Make root itself scrollable
+  root.style.overflow='auto';
+  root.style.height='100%';
+  document.body.style.overflow='hidden';
+}
+
+render();
+</script>
+</body>
+</html>

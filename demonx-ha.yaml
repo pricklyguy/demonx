@@ -1,0 +1,76 @@
+# ──────────────────────────────────────────────────────────────
+#  DemonX CNC — Home Assistant Integration
+#  Add to configuration.yaml (or a package file)
+#  Replace 10.10.1.31 with your DemonX server IP
+# ──────────────────────────────────────────────────────────────
+
+# REST sensor — polls /api/status every 10 seconds
+rest:
+  - resource: http://10.10.1.31:8080/api/status
+    scan_interval: 10
+    sensor:
+      - name: "DemonX State"
+        unique_id: demonx_state
+        value_template: "{{ value_json.state }}"
+        icon: mdi:router-wireless
+
+      - name: "DemonX Feed Rate"
+        unique_id: demonx_feed
+        value_template: "{{ value_json.feed }}"
+        unit_of_measurement: "mm/min"
+        icon: mdi:speedometer
+
+      - name: "DemonX Spindle RPM"
+        unique_id: demonx_rpm
+        value_template: "{{ value_json.rpm }}"
+        unit_of_measurement: "RPM"
+        icon: mdi:rotate-right
+
+      - name: "DemonX Work X"
+        unique_id: demonx_wx
+        value_template: "{{ value_json.wpos[0] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:axis-x-arrow
+
+      - name: "DemonX Work Y"
+        unique_id: demonx_wy
+        value_template: "{{ value_json.wpos[1] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:axis-y-arrow
+
+      - name: "DemonX Work Z"
+        unique_id: demonx_wz
+        value_template: "{{ value_json.wpos[2] | round(3) }}"
+        unit_of_measurement: "mm"
+        icon: mdi:axis-z-arrow
+
+      - name: "DemonX Viewers"
+        unique_id: demonx_viewers
+        value_template: "{{ value_json.clients }}"
+        icon: mdi:monitor-multiple
+
+    binary_sensor:
+      - name: "DemonX Online"
+        unique_id: demonx_online
+        value_template: "{{ value_json.connected }}"
+        device_class: connectivity
+
+      - name: "DemonX Running"
+        unique_id: demonx_running
+        value_template: "{{ value_json.state == 'Run' }}"
+        device_class: running
+
+# ──────────────────────────────────────────────────────────────
+#  Example Lovelace card (add to your dashboard YAML)
+# ──────────────────────────────────────────────────────────────
+# type: entities
+# title: DemonX CNC
+# entities:
+#   - entity: binary_sensor.demonx_online
+#   - entity: sensor.demonx_state
+#   - entity: sensor.demonx_feed_rate
+#   - entity: sensor.demonx_spindle_rpm
+#   - entity: sensor.demonx_work_x
+#   - entity: sensor.demonx_work_y
+#   - entity: sensor.demonx_work_z
+#   - entity: sensor.demonx_viewers
