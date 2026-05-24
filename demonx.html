@@ -77,6 +77,7 @@ const DEF_SETTINGS = {
   pcbHomeX:      0,      // Machine X for PCB fixture position
   pcbHomeY:      0,      // Machine Y for PCB fixture position
   pcbHomeEnabled:false,  // show PCB Home button once configured
+  pcbSafeZ:      25,     // Z clearance for PCB home rapid — set higher than your tallest clamp
 };
 
 const DEF_PANELS = [
@@ -117,7 +118,7 @@ const app = {
     gridCols:5, gridRows:5,
     minX:0, maxX:100, minY:0, maxY:100,
     scanOffsetX:0, scanOffsetY:0,
-    probeDepth:-3, probeFeed:50, safeZAL:2,
+    probeDepth:-3, probeFeed:50, probeFeedFast:75, probeFeedFine:45, safeZAL:2,
     grid:[], currentPt:0, totalPts:0,
   },
   cfgSettings:{}, cfgLoading:false, cfgEdits:{},
@@ -922,35 +923,63 @@ async function startAutolevel(){
   }
   app.okQueue=[];
   try{
-    for(const{row,col} of pts){
+    const probeFeedFast=al.probeFeedFast||probeFeed;
+    const probeFeedFine=al.probeFeedFine||Math.round(probeFeed*0.6);
+    const totalPts=pts.length;
+
+    for(let ptIdx=0;ptIdx<totalPts;ptIdx++){
       if(al.stopProbing) break;
+      const{row,col}=pts[ptIdx];
+      const isLastPt=ptIdx===totalPts-1;
       al.currentPt++;
       const x=minX+(maxX-minX)*col/(gc-1);
       const y=minY+(maxY-minY)*row/(gr-1);
       addLog(`AL ${al.currentPt}/${al.totalPts}: X${x.toFixed(2)} Y${y.toFixed(2)}`,'sys');
-      // Move to safe Z then XY
+      // Move to safe Z then XY position
       await sendLine(`G90 G0 Z${safeZAL}`);
       await sendLine(`G90 G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
-      // Probe — set up PRB capture first
-      const prbP=waitForPRB(20000);
-      await write(`G38.2 Z${probeDepth} F${probeFeed}`);
-      addLog(`G38.2 Z${probeDepth} F${probeFeed}`,'tx');
+
+      // ── PASS 1: fast probe ────────────────────────────────────
+      const prbP1=waitForPRB(20000);
+      await write(`G38.2 Z${probeDepth} F${probeFeedFast}`);
+      addLog(`G38.2 Z${probeDepth} F${probeFeedFast} (fast)`,'tx');
+      let finalZ=null;
       try{
-        const prb=await prbP;
+        const prb1=await prbP1;
         await waitForOk(5000);
-        if(prb.ok){
-          // Convert to work Z using current WCO
-          const wz=prb.z-(app.grbl.WCO?.[2]??0);
-          al.grid[row][col]=wz;
-          addLog(`  Z=${wz.toFixed(4)}`,'sys');
-        } else {
-          al.grid[row][col]=0;
-          addLog(`  Probe fail — using 0`,'err');
+        if(!prb1.ok) throw new Error('Pass 1 probe fail');
+
+        // ── PASS 2: 1mm retract then slow probe ───────────────
+        await sendLine('G91 G0 Z1'); // small retract — just enough to clear
+        await sendLine('G90');
+        const prbP2=waitForPRB(20000);
+        await write(`G38.2 Z${probeDepth} F${probeFeedFine}`);
+        addLog(`G38.2 Z${probeDepth} F${probeFeedFine} (fine)`,'tx');
+        const prb2=await prbP2;
+        await waitForOk(5000);
+        if(!prb2.ok) throw new Error('Pass 2 probe fail');
+
+        // Use pass 2 result — more accurate
+        const wz=prb2.z-(app.grbl.WCO?.[2]??0);
+        finalZ=wz;
+        al.grid[row][col]=wz;
+        addLog(`  Z=${wz.toFixed(4)}`,'sys');
+
+        // ── Post-probe retract ────────────────────────────────
+        // Last point: park at full safe Z
+        // All others: stay put — next point's G90 G0 Z{safeZAL} handles the lift
+        if(isLastPt){
+          const parkZ=app.settings.safeZ||10;
+          await sendLine(`G90 G0 Z${parkZ}`);
+          addLog(`Scan complete — parked at Z${parkZ}`,'sys');
         }
+        // No else needed — next iteration opens with G90 G0 Z{safeZAL}
+
       } catch(ex){
-        addLog(`  Timeout — using 0`,'err');
-        al.grid[row][col]=0;
+        addLog(`  Probe error: ${ex.message} — using 0`,'err');
+        al.grid[row][col]=finalZ!==null?finalZ:0;
         await waitForOk(3000).catch(()=>{});
+        await sendLine(`G90 G0 Z${safeZAL}`); // safe retract on error
       }
       render();
     }
@@ -962,7 +991,7 @@ async function startAutolevel(){
         if(al.grid[r][c]!==null) al.grid[r][c]-=mean;
       }
       al.measured=true;
-      await sendLine(`G90 G0 Z${safeZAL}`);
+      // Already at safeZAL from last point retract
       saveAL();
       const range=(Math.max(...vals)-Math.min(...vals)).toFixed(4);
       addLog(`Autolevel done. Surface range: ${range}mm`,'sys');
@@ -1389,18 +1418,21 @@ function buildPanel(p){
     // PCB Home button — shown when configured in Config panel
     if(app.settings.pcbHomeEnabled){
       const pcbBtn=h('div',{style:{marginBottom:'10px'}});
+      const safeZ=app.settings.pcbSafeZ||25;
       pcbBtn.appendChild(mkBtn(
         `⌂ GOTO PCB HOME  (M:${app.settings.pcbHomeX}, ${app.settings.pcbHomeY})`,
         ()=>{
           if(!app.connected){addLog('Not connected','err');return;}
-          const safeZ=app.settings.safeZ||5;
           const x=app.settings.pcbHomeX, y=app.settings.pcbHomeY;
-          // Raise to safe Z first, then move in machine coords, then zero XY work
+          // Step 1: Raise Z in WORK coords first (handles any WCO offset)
+          // Step 2: Move XY in MACHINE coords (G53 — ignores work offsets)
+          // Step 3: Zero work XY at fixture position
           const seq=[
-            `G90 G0 Z${safeZ}`,
-            `G53 G0 X${x} Y${y}`,
-            'G10 L20 P1 X0 Y0',
+            `G90 G0 Z${safeZ}`,           // raise to PCB safe Z in work coords
+            `G53 G0 X${x} Y${y}`,         // rapid to fixture in machine coords
+            'G10 L20 P1 X0 Y0',           // set work X0 Y0
           ];
+          addLog(`PCB Home — raising to Z${safeZ} then moving to M:${x},${y}`,'sys');
           (async()=>{
             for(const cmd of seq){ await sendLine(cmd); addLog(cmd,'tx'); }
             notify(`✓ PCB Home — Work X0 Y0 set`,'#f97316');
@@ -1409,6 +1441,10 @@ function buildPanel(p){
         },
         '#f97316',{full:true,disabled:!app.connected}
       ));
+      // Safe Z warning if set low
+      if(safeZ<15) pcbBtn.appendChild(h('div',{style:{fontSize:'10px',color:'#ef4444',
+        marginTop:'4px',padding:'3px 6px',background:'#ef444412',borderRadius:'4px'}},
+        `⚠ PCB Safe Z is ${safeZ}mm above Work Z0 — raise it if you have clamps on the spoilboard`));
       body.appendChild(pcbBtn);
     }
     const ss=h('div',{style:{background:C.bg+'aa',border:`1px solid ${C.border}`,
@@ -1520,9 +1556,10 @@ function buildPanel(p){
       }
 
       gs.appendChild(sep());
-      gs.appendChild(mkRow('Probe depth', mkNum(al.probeDepth,v=>{al.probeDepth=v;},'65px'),'mm'));
-      gs.appendChild(mkRow('Probe feed',  mkNum(al.probeFeed, v=>{al.probeFeed=v;}, '48px','1'),'mm/min'));
-      gs.appendChild(mkRow('Safe Z (AL)', mkNum(al.safeZAL,   v=>{al.safeZAL=v;},  '48px'),'mm'));
+      gs.appendChild(mkRow('Probe depth',   mkNum(al.probeDepth,    v=>{al.probeDepth=v;},'65px'),'mm'));
+      gs.appendChild(mkRow('Fast feed',     mkNum(al.probeFeedFast||75, v=>{al.probeFeedFast=v;},'48px','1'),'mm/min'));
+      gs.appendChild(mkRow('Fine feed',     mkNum(al.probeFeedFine||45, v=>{al.probeFeedFine=v;},'48px','1'),'mm/min'));
+      gs.appendChild(mkRow('Safe Z (AL)',   mkNum(al.safeZAL,       v=>{al.safeZAL=v;},  '48px'),'mm'));
       body.appendChild(gs);
 
       const br2=h('div',{style:{display:'flex',gap:'6px',marginBottom:'8px'}});
@@ -1579,7 +1616,8 @@ function buildPanel(p){
           const blob=new Blob([data],{type:'application/json'});
           const a=document.createElement('a');
           a.href=URL.createObjectURL(blob);
-          a.download=`demonx-scan-${new Date().toISOString().slice(0,16).replace(/[T:]/g,'-')}.json`;
+          const baseName=app.gfile?app.gfile.replace(/\.[^.]+$/,'').replace(/[^a-z0-9_-]/gi,'-'):'scan';
+          a.download=`demonx-scan-${baseName}-${new Date().toISOString().slice(0,10)}.json`;
           a.click();
           URL.revokeObjectURL(a.href);
           notify('✓ Scan saved','#06b6d4');
@@ -1680,6 +1718,23 @@ function buildPanel(p){
     coordRow.appendChild(yInp);
     coordRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'mm (mach)'));
     pcbSection.appendChild(coordRow);
+
+    // PCB Safe Z — separate from general safe Z, should clear tallest clamp
+    const safeZRow=h('div',{style:{display:'flex',gap:'5px',alignItems:'center',marginBottom:'6px'}});
+    safeZRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted,width:'50px'}},'Safe Z'));
+    const szInp=h('input',{type:'number',value:app.settings.pcbSafeZ||25,step:'1',min:'5',
+      style:{width:'60px',background:C.bg,color:C.text,border:`1px solid ${
+        (app.settings.pcbSafeZ||25)<15?'#ef4444':C.border}`,
+        borderRadius:'4px',padding:'4px 6px',fontSize:'12px',outline:'none',fontFamily:'inherit'}});
+    szInp.addEventListener('input',e=>{
+      const v=parseFloat(e.target.value)||25;
+      app.settings.pcbSafeZ=v;
+      szInp.style.borderColor=v<15?'#ef4444':C.border;
+      saveSettings();
+    });
+    safeZRow.appendChild(szInp);
+    safeZRow.appendChild(h('span',{style:{fontSize:'10px',color:C.muted}},'mm above Work Z0 — must clear tallest clamp'));
+    pcbSection.appendChild(safeZRow);
 
     // Capture + enable row
     const capRow=h('div',{style:{display:'flex',gap:'5px',alignItems:'center'}});
@@ -1788,14 +1843,33 @@ function buildPanel(p){
 
   // ── CONSOLE ────────────────────────────────────────────────────────────
   if(p.id==='console'){
-    const logH=hasFixedH?(p.h-34-52)+'px':'130px';
-    const ld=h('div',{id:'console-log',style:{height:logH,overflow:'auto',fontSize:'11px',lineHeight:'1.7',marginBottom:'8px'}});
+    const logH=hasFixedH?(p.h-34-76)+'px':'130px';
+    const ld=h('div',{id:'console-log',style:{height:logH,overflow:'auto',fontSize:'11px',
+      lineHeight:'1.7',marginBottom:'6px',userSelect:'text',cursor:'text',
+      fontFamily:'monospace'}});
     app.log.forEach(l=>{
-      ld.appendChild(h('div',{style:{color:l.k==='err'?'#ef4444':l.k==='sys'?C.muted:l.k==='tx'?'#f59e0b':'#7dd3fc'}},
+      ld.appendChild(h('div',{style:{color:l.k==='err'?'#ef4444':l.k==='sys'?C.muted:l.k==='tx'?'#f59e0b':'#7dd3fc',
+        userSelect:'text'}},
         (l.k==='tx'?'> ':'')+l.m));
     });
     setTimeout(()=>{ld.scrollTop=ld.scrollHeight;},0);
     body.appendChild(ld);
+    // Copy / Download toolbar
+    const logBar=h('div',{style:{display:'flex',gap:'5px',marginBottom:'6px'}});
+    logBar.appendChild(mkBtn('📋 Copy Log',()=>{
+      const text=app.log.map(l=>(l.k==='tx'?'> ':l.k==='sys'?'# ':l.k==='err'?'! ':'')+l.m).join('\n');
+      navigator.clipboard.writeText(text).then(()=>notify('✓ Log copied','#64748b'));
+    },'#64748b',{small:true}));
+    logBar.appendChild(mkBtn('💾 Download',()=>{
+      const text=app.log.map(l=>(l.k==='tx'?'> ':l.k==='sys'?'# ':l.k==='err'?'! ':'')+l.m).join('\n');
+      const blob=new Blob([text],{type:'text/plain'});
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download=`demonx-log-${new Date().toISOString().slice(0,16).replace(/[T:]/g,'-')}.txt`;
+      a.click(); URL.revokeObjectURL(a.href);
+    },'#64748b',{small:true}));
+    logBar.appendChild(mkBtn('✕ Clear',()=>{app.log=[];renderLog();},'#64748b',{small:true}));
+    body.appendChild(logBar);
     const cr=h('div',{style:{display:'flex',gap:'6px'}});
     const ci=h('input',{type:'text',value:app.cmdInput,
       placeholder:app.connected?'Enter G-code or $ command…':'Connect to enable…',
