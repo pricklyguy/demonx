@@ -86,6 +86,26 @@ describe('probe safety flow', () => {
     // Side faces are probed 7 mm below the block top (lift 3, drop 10); the final
     // 10 mm retract then ends 3 mm above the top, exactly as V1 did.
     expect(c.status.wpos.z).toBeCloseTo(s.plateZ + 3, 2);
+    // ...and it parks over X0 Y0 so the origin is visible
+    expect(c.status.wpos.x).toBeCloseTo(0, 2);
+    expect(c.status.wpos.y).toBeCloseTo(0, 2);
+    await c.disconnect();
+  }, 90000);
+
+  it('XYZ probe with a tiny end height still clears the block before moving to X0 Y0', async () => {
+    const { c, p } = await setup();
+    const s = { ...SETTINGS, plateZ: 22, clearance: 1 };
+    p.start('xyz', s);
+    p.confirm(p.info.id, 'confirmConnect');
+    let minZ = Infinity;
+    const watch = setInterval(() => { minZ = Math.min(minZ, c.status.wpos.z); }, 20);
+    await until(() => p.info.phase === 'confirmRemove', 60000);
+    clearInterval(watch);
+    await until(() => c.status.state === 'Idle');
+    expect(p.info.success).toBe(true);
+    // lifted to at least 3 mm above the block top (work Z = plate height) before moving over
+    expect(c.status.wpos.z).toBeGreaterThanOrEqual(s.plateZ + 3 - 0.01);
+    expect(c.status.wpos.x).toBeCloseTo(0, 2);
     await c.disconnect();
   }, 90000);
 

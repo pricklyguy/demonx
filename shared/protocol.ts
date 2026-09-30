@@ -149,6 +149,8 @@ export type ClientMessage =
   | { type: 'home' }
   | { type: 'unlock' }
   | { type: 'zero'; axes: JogAxis[] }
+  /** Move to work Z0 or work X0 Y0 at the given feed (mm/min) */
+  | { type: 'goto'; target: 'z0' | 'xy0'; feed: number }
   | { type: 'reset' }
   | { type: 'hold' }
   | { type: 'resume' }

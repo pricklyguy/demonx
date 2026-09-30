@@ -265,6 +265,15 @@ export class GrblController extends EventEmitter {
       case 'jogCancel': return this.realtime(0x85);
       case 'home': return this.sendLine('$H');
       case 'unlock': return this.sendLine('$X');
+      case 'goto': {
+        if (!(msg.feed > 0 && msg.feed <= 10000)) return this.log('err', 'Invalid feed for go-to move');
+        if (msg.target === 'z0') return this.sendLine(`G21G90G1Z0F${msg.feed}`);
+        // Never drag the tool across the work below the surface
+        if (this.status.wpos.z < -0.001) {
+          return this.log('err', 'Raise Z to Z0 or above before going to XY0 (the tool is below the work surface)');
+        }
+        return this.sendLine(`G21G90G1X0Y0F${msg.feed}`);
+      }
       case 'zero': {
         const axes = msg.axes.map((a) => `${a}0`).join('');
         return axes ? this.sendLine(`G10L20P0${axes}`) : undefined;

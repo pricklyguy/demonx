@@ -192,7 +192,14 @@ export class ProbeManager extends EventEmitter {
     await this.move('Positioning for Y', `G0 X${n(XYZ_Y_START_X)}`);
     await this.cmd('Relative mode', 'G91');
     await side('Y', s.plateY);
-    await this.move('Retracting to clearance', `G0 Z${n(s.clearance)}`);
+    // The Y back-off is done. Lift clear of the block, then park the tool over
+    // X0 Y0 so the user can see where the work origin is. The lift is never less
+    // than the side-probing depth plus 3 mm, so the move to X0 Y0 always passes
+    // above the block whatever end height is configured.
+    const lift = Math.max(s.clearance, XYZ_DROP - XYZ_LIFT + 3);
+    await this.move('Lifting clear of the block', `G0 Z${n(lift)}`);
+    await this.cmd('Absolute mode', 'G90');
+    await this.move('Moving to X0 Y0', 'G0 X0 Y0');
   }
 
   // ---------- step helpers ----------

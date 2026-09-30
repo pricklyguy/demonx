@@ -59,6 +59,28 @@ describe('controller + simulator', () => {
     await c.disconnect();
   });
 
+  it('goes to Z0 and XY0, refusing XY0 while below the work surface', async () => {
+    const c = await setup();
+    c.handle({ type: 'jog', dx: 30, dy: 20, feed: 6000 });
+    await until(() => c.status.mpos.x === 30 && c.status.mpos.y === 20);
+    c.handle({ type: 'zero', axes: ['X', 'Y', 'Z'] });
+    c.handle({ type: 'jog', dx: 7, dy: 7, feed: 6000 });
+    await until(() => c.status.wpos.x === 7 && c.status.wpos.y === 7);
+    c.handle({ type: 'jog', dz: -5, feed: 3000 });
+    await until(() => c.status.wpos.z === -5);
+    c.handle({ type: 'goto', target: 'xy0', feed: 6000 });
+    await wait(300);
+    expect(c.status.wpos.x).toBe(7); // refused: tool is below Z0
+    expect(c.logBuffer.some((l) => l.text.includes('Raise Z'))).toBe(true);
+    c.handle({ type: 'goto', target: 'z0', feed: 3000 });
+    await until(() => c.status.wpos.z === 0);
+    c.handle({ type: 'goto', target: 'xy0', feed: 6000 });
+    await until(() => c.status.wpos.x === 0 && c.status.wpos.y === 0);
+    c.handle({ type: 'goto', target: 'z0', feed: 0 }); // invalid feed is rejected
+    expect(c.logBuffer.some((l) => l.text.includes('Invalid feed'))).toBe(true);
+    await c.disconnect();
+  });
+
   it('limits Z jog to 20 mm', async () => {
     const c = await setup();
     c.handle({ type: 'jog', dz: 100, feed: 300 });

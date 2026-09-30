@@ -4,6 +4,7 @@ import { useMachine } from './useMachine';
 import type { JogAxis, ProbeKind, ProbeSettings } from '../../shared/protocol';
 
 const fmt = (n: number) => n.toFixed(3);
+const savedNum = (key: string, fallback: number) => Number(localStorage.getItem(key)) || fallback;
 const fmtTime = (ms: number) => {
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
@@ -113,8 +114,13 @@ function DroPanel({ m }: { m: Machine }) {
       <div className="row">
         <button className="btn" disabled={off} onClick={() => m.send({ type: 'zero', axes: ['X', 'Y'] })}>Zero XY</button>
         <button className="btn" disabled={off} onClick={() => m.send({ type: 'zero', axes: ['X', 'Y', 'Z'] })}>Zero All</button>
-        <button className="btn" disabled={off} onClick={() => m.send({ type: 'home' })}>Home</button>
+        <button className="btn home" disabled={off} onClick={() => m.send({ type: 'home' })}>Home</button>
         <button className="btn warn" disabled={off} onClick={() => m.send({ type: 'unlock' })}>Unlock</button>
+      </div>
+      <div className="row">
+        {/* Same feeds as the jog panel; Z stays slow so there is time to react */}
+        <button className="btn" disabled={off} onClick={() => m.send({ type: 'goto', target: 'z0', feed: savedNum('jogZFeed', 300) })}>Go to Z0</button>
+        <button className="btn" disabled={off} onClick={() => m.send({ type: 'goto', target: 'xy0', feed: savedNum('jogFeedXY', 3000) })}>Go to XY0</button>
       </div>
       <div className="muted small">Large = work position · small = machine position · Feed {Math.round(m.status.feed)} · Spindle {Math.round(m.status.spindle)}</div>
     </Panel>
