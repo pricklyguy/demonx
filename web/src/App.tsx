@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Machine } from './useMachine';
 import { useMachine } from './useMachine';
-import type { JogAxis } from '../../shared/protocol';
+import type { JogAxis, ProbeKind, ProbeSettings } from '../../shared/protocol';
 
 const fmt = (n: number) => n.toFixed(3);
 const fmtTime = (ms: number) => {
@@ -25,9 +25,11 @@ export function App() {
         <DroPanel m={m} />
         <JogPanel m={m} />
         <JobPanel m={m} />
+        <ProbePanel m={m} />
         <OverridePanel m={m} />
         <ConsolePanel m={m} />
       </main>
+      <ProbeDialog m={m} />
     </div>
   );
 }
@@ -141,7 +143,7 @@ function JogBtn({ label, disabled, onJog, className = '' }: { label: string; dis
 
 function JogPanel({ m }: { m: Machine }) {
   const [step, setStep] = useSaved('jogStep', 1);
-  const [feed, setFeed] = useSaved('jogFeed', 1000);
+  const [feed, setFeed] = useSaved('jogFeedXY', 3000);
   const [zStep, setZStep] = useSaved('jogZStep', 1);
   const [zFeed, setZFeed] = useSaved('jogZFeed', 300);
   const off = !m.connection.connected || m.job.state === 'running';
@@ -249,5 +251,144 @@ function ConsolePanel({ m }: { m: Machine }) {
         <button className="btn" disabled={!m.connection.connected}>Send</button>
       </form>
     </Panel>
+  );
+}
+
+// ---------------- Probing ----------------
+
+const PROBE_DEFAULTS = {
+  plateZ_z: 25.05, plateZ_xyz: 22, plateX: 7, plateY: 7, endmill: 6.35,
+  feedFast: 75, feedFine: 45, maxZ: 25, maxXY: 25, retract: 2, clearance_z: 10, clearance_pcb: 5, clearance_xyz: 10,
+};
+type ProbeForm = typeof PROBE_DEFAULTS;
+
+const PROBE_FIELDS: { key: keyof ProbeForm; label: string; unit: string }[] = [
+  { key: 'plateZ_z', label: 'Z plate height', unit: 'mm' },
+  { key: 'plateZ_xyz', label: 'XYZ block height', unit: 'mm' },
+  { key: 'plateX', label: 'XYZ block wall X', unit: 'mm' },
+  { key: 'plateY', label: 'XYZ block wall Y', unit: 'mm' },
+  { key: 'endmill', label: 'Endmill diameter', unit: 'mm' },
+  { key: 'feedFast', label: 'Fast feed', unit: 'mm/min' },
+  { key: 'feedFine', label: 'Fine feed', unit: 'mm/min' },
+  { key: 'maxZ', label: 'Max Z travel', unit: 'mm' },
+  { key: 'maxXY', label: 'Max XY travel', unit: 'mm' },
+  { key: 'retract', label: 'Retract between passes', unit: 'mm' },
+  { key: 'clearance_z', label: 'Z probe: end height', unit: 'mm' },
+  { key: 'clearance_pcb', label: 'PCB probe: end height', unit: 'mm' },
+  { key: 'clearance_xyz', label: 'XYZ probe: end height', unit: 'mm' },
+];
+
+function useProbeForm(): [ProbeForm, (k: keyof ProbeForm, v: number) => void] {
+  const [f, setF] = useState<ProbeForm>(() => {
+    try { return { ...PROBE_DEFAULTS, ...JSON.parse(localStorage.getItem('probeForm') ?? '{}') }; } catch { return PROBE_DEFAULTS; }
+  });
+  const set = (k: keyof ProbeForm, v: number) => {
+    const next = { ...f, [k]: v };
+    setF(next);
+    localStorage.setItem('probeForm', JSON.stringify(next));
+  };
+  return [f, set];
+}
+
+function toSettings(f: ProbeForm, kind: ProbeKind): ProbeSettings {
+  return {
+    plateZ: kind === 'xyz' ? f.plateZ_xyz : kind === 'z' ? f.plateZ_z : 0,
+    plateX: f.plateX, plateY: f.plateY, endmill: f.endmill,
+    feedFast: f.feedFast, feedFine: f.feedFine, maxZ: f.maxZ, maxXY: f.maxXY, retract: f.retract,
+    clearance: kind === 'xyz' ? f.clearance_xyz : kind === 'z' ? f.clearance_z : f.clearance_pcb,
+  };
+}
+
+function ProbePanel({ m }: { m: Machine }) {
+  const [form, setForm] = useProbeForm();
+  const busy = m.probe.phase !== 'idle';
+  const ready = m.connection.connected && m.status.state === 'Idle' && !busy && m.job.state !== 'running' && m.job.state !== 'paused';
+  const start = (kind: ProbeKind) => m.send({ type: 'probeStart', kind, settings: toSettings(form, kind) });
+  return (
+    <Panel title="Probe">
+      <div className="row">
+        <button className="btn" disabled={!ready} onClick={() => start('z')}>▼ Z probe</button>
+        <button className="btn" disabled={!ready} onClick={() => start('xyz')}>⊕ XYZ</button>
+        <button className="btn" disabled={!ready} onClick={() => start('pcb')}>◎ PCB Z</button>
+      </div>
+      <div className="muted small">
+        Each probe asks you to confirm the probe is connected before it moves, and to confirm it is removed before anything else can run.
+      </div>
+      <details>
+        <summary className="muted small">Probe settings</summary>
+        <div className="pform">
+          {PROBE_FIELDS.map((fld) => (
+            <label key={fld.key}>
+              <span>{fld.label}</span>
+              <input type="number" step="any" value={form[fld.key]} onChange={(e) => setForm(fld.key, Number(e.target.value))} />
+              <span className="muted">{fld.unit}</span>
+            </label>
+          ))}
+        </div>
+      </details>
+    </Panel>
+  );
+}
+
+const REMOVE_TEXT: Record<ProbeKind, string> = {
+  z: 'Remove the probe clip from the bit and take the plate off the work surface.',
+  pcb: 'Remove the ground clip from the bit.',
+  xyz: 'Remove the probe clip from the bit and take the touch block off the work surface.',
+};
+
+function ProbeDialog({ m }: { m: Machine }) {
+  const p = m.probe;
+  if (p.phase === 'idle') return null;
+  const triggered = m.status.pins.includes('P');
+  const confirm = () => m.send({ type: 'probeConfirm', id: p.id, phase: p.phase });
+  const results = p.result && Object.entries(p.result).map(([k, v]) => `${k.toUpperCase()} ${(v as number).toFixed(3)}`).join('   ');
+
+  return (
+    <div className="overlay">
+      <div className={`dialog ${p.phase === 'confirmRemove' ? (p.success ? 'dlg-amber' : 'dlg-red') : 'dlg-amber'}`} role="alertdialog" aria-modal="true">
+        <div className="dlg-kind">{p.title}</div>
+
+        {p.phase === 'confirmConnect' && (
+          <>
+            <h3>{p.kind === 'pcb' ? 'IS YOUR GROUND CONNECTED?' : 'IS THE PROBE CONNECTED?'}</h3>
+            <ul>{p.checklist?.map((c) => <li key={c}>{c}</li>)}</ul>
+            <div className={`pin ${triggered ? 'pin-on' : ''}`}>
+              Probe input: <b>{triggered ? 'TRIGGERED' : 'OPEN'}</b>
+              <span className="small"> Touch the bit to the {p.kind === 'pcb' ? 'board' : 'plate'} to test the connection: it should read TRIGGERED, then OPEN again when released.</span>
+            </div>
+            <div className="row end">
+              <button className="btn" onClick={() => m.send({ type: 'probeCancel', id: p.id })}>Cancel</button>
+              <button className="btn primary" onClick={confirm}>Yes, it is connected. Start probing</button>
+            </div>
+          </>
+        )}
+
+        {p.phase === 'running' && (
+          <>
+            <h3>PROBING…</h3>
+            <div className="dlg-step">{p.step}</div>
+            {results && <div className="mono">{results}</div>}
+            <div className="muted small">Keep your hand near the stop button. The machine is moving.</div>
+            <div className="row end">
+              <button className="btn danger" onClick={() => m.send({ type: 'probeCancel', id: p.id })}>STOP</button>
+            </div>
+          </>
+        )}
+
+        {p.phase === 'confirmRemove' && (
+          <>
+            {p.success
+              ? <div className="ok-line">Probing complete{results ? `: ${results}` : ''}</div>
+              : <div className="err">Probe failed: {p.error}</div>}
+            <h3>REMOVE THE PROBE NOW</h3>
+            <div>{p.kind && REMOVE_TEXT[p.kind]}</div>
+            {!p.success && <div className="muted small">If the machine is in alarm after you confirm, use Unlock to clear it, then check your position before continuing.</div>}
+            <div className="row end">
+              <button className="btn primary" onClick={confirm}>Probe removed. Continue</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }

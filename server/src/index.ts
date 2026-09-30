@@ -7,6 +7,7 @@ import type { ClientMessage, ServerMessage } from '../../shared/protocol.js';
 import { GrblController } from './controller.js';
 import { SerialTransport, listSerialPorts } from './transport.js';
 import { SimulatorTransport } from './simulator.js';
+import { ProbeManager } from './probe.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -18,6 +19,7 @@ const MIME: Record<string, string> = {
 };
 
 const controller = new GrblController();
+const probe = new ProbeManager(controller);
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
@@ -39,6 +41,7 @@ const broadcast = (m: ServerMessage) => wss.clients.forEach((c) => send(c as Web
 controller.on('status', (d) => broadcast({ type: 'status', data: d }));
 controller.on('job', (d) => broadcast({ type: 'job', data: d }));
 controller.on('connection', (d) => broadcast({ type: 'connection', data: d }));
+probe.on('probe', (d) => broadcast({ type: 'probe', data: d }));
 controller.on('log', (d) => broadcast({ type: 'log', data: d }));
 
 // keep job elapsed time ticking for all clients
@@ -48,7 +51,7 @@ wss.on('connection', (ws) => {
   send(ws, {
     type: 'snapshot',
     data: {
-      connection: controller.connection, status: controller.status, job: controller.job,
+      connection: controller.connection, status: controller.status, job: controller.job, probe: probe.info,
       clients: wss.clients.size, log: controller.logBuffer.slice(-100),
     },
   });
@@ -67,6 +70,9 @@ wss.on('connection', (ws) => {
           return await controller.connect(t, msg.target);
         }
         case 'disconnect': return await controller.disconnect();
+        case 'probeStart': return probe.start(msg.kind, msg.settings);
+        case 'probeConfirm': return probe.confirm(msg.id, msg.phase);
+        case 'probeCancel': return probe.cancel(msg.id);
         default: return controller.handle(msg);
       }
     } catch (e) {

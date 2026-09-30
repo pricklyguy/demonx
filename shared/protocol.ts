@@ -72,10 +72,55 @@ export interface LogLine {
   text: string;
 }
 
+export type ProbeKind = 'z' | 'xyz' | 'pcb';
+/**
+ * idle -> confirmConnect (user must confirm the probe is connected)
+ *      -> running (server drives the probe cycle)
+ *      -> confirmRemove (user must confirm the probe/clip is removed)
+ *      -> idle
+ */
+export type ProbePhase = 'idle' | 'confirmConnect' | 'running' | 'confirmRemove';
+
+export interface ProbeSettings {
+  /** Height of the touch plate/block: work Z is set to this at contact (0 for PCB) */
+  plateZ: number;
+  /** XYZ block wall thickness on X and Y */
+  plateX: number;
+  plateY: number;
+  /** Endmill diameter (XYZ probe only) */
+  endmill: number;
+  feedFast: number;
+  feedFine: number;
+  maxZ: number;
+  maxXY: number;
+  /** Retract between the fast and fine pass */
+  retract: number;
+  /** Final Z retract after probing */
+  clearance: number;
+}
+
+export interface ProbeInfo {
+  /** Increments per probe run; confirmations must quote it so stale clicks are ignored */
+  id: number;
+  phase: ProbePhase;
+  kind?: ProbeKind;
+  title?: string;
+  checklist?: string[];
+  /** Current step while running */
+  step?: string;
+  /** Machine-position contact points recorded so far */
+  result?: Partial<Vec3>;
+  success?: boolean;
+  error?: string;
+}
+
+export const emptyProbe = (): ProbeInfo => ({ id: 0, phase: 'idle' });
+
 export interface Snapshot {
   connection: ConnectionInfo;
   status: MachineStatus;
   job: JobInfo;
+  probe: ProbeInfo;
   clients: number;
   log: LogLine[];
 }
@@ -85,6 +130,7 @@ export type ServerMessage =
   | { type: 'snapshot'; data: Snapshot }
   | { type: 'status'; data: MachineStatus }
   | { type: 'job'; data: JobInfo }
+  | { type: 'probe'; data: ProbeInfo }
   | { type: 'connection'; data: ConnectionInfo }
   | { type: 'clients'; data: number }
   | { type: 'log'; data: LogLine }
@@ -111,7 +157,10 @@ export type ClientMessage =
   | { type: 'jobStart' }
   | { type: 'jobPause' }
   | { type: 'jobResume' }
-  | { type: 'jobStop' };
+  | { type: 'jobStop' }
+  | { type: 'probeStart'; kind: ProbeKind; settings: ProbeSettings }
+  | { type: 'probeConfirm'; id: number; phase: ProbePhase }
+  | { type: 'probeCancel'; id: number };
 
 export const emptyVec = (): Vec3 => ({ x: 0, y: 0, z: 0 });
 

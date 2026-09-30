@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type {
-  ConnectionInfo, JobInfo, LogKind, LogLine, MachineStatus, ClientMessage,
+  ConnectionInfo, JobInfo, LogKind, LogLine, MachineStatus, ClientMessage, Vec3,
 } from '../../shared/protocol.js';
 import { emptyJob, emptyStatus } from '../../shared/protocol.js';
 import { GRBL_ALARMS, GRBL_ERRORS, cleanGcode, parseStatus } from './parser.js';
@@ -12,7 +12,10 @@ const POLL_MS = 200;
 /** Largest single Z jog accepted from any client (protects the wasteboard). */
 export const MAX_Z_JOG = 20;
 
-interface Pending { len: number; job: boolean }
+export interface AckResult { ok: boolean; error?: string }
+interface Pending { len: number; job: boolean; resolve?: (r: AckResult) => void }
+interface Queued { line: string; resolve?: (r: AckResult) => void }
+export interface ProbeHit { pos: Vec3; success: boolean }
 
 const OVERRIDE_BYTES: Record<string, Record<string, number>> = {
   feed: { reset: 0x90, plus10: 0x91, minus10: 0x92, plus1: 0x93, minus1: 0x94 },
@@ -25,7 +28,7 @@ const OVERRIDE_BYTES: Record<string, Record<string, number>> = {
  * controller goes through here so all browser clients share one consistent
  * state. Uses GRBL character-counting streaming for jobs.
  *
- * Events: 'status', 'job', 'connection', 'log'
+ * Events: 'status', 'job', 'connection', 'log', 'prb' (ProbeHit), 'alarm' (code), 'reset'
  */
 export class GrblController extends EventEmitter {
   status: MachineStatus = emptyStatus();
@@ -38,7 +41,9 @@ export class GrblController extends EventEmitter {
   private poll?: NodeJS.Timeout;
   private pending: Pending[] = [];
   private used = 0;
-  private manualQueue: string[] = [];
+  private manualQueue: Queued[] = [];
+  /** When set, client commands that could move the machine are refused (e.g. mid-probe). */
+  lock?: string;
   private jobLines: string[] = [];
   private jobIndex = 0;
   private stopping = false;
@@ -71,7 +76,8 @@ export class GrblController extends EventEmitter {
     if (this.poll) clearInterval(this.poll);
     this.poll = undefined;
     this.transport = undefined;
-    this.pending = []; this.used = 0; this.manualQueue = []; this.rx = '';
+    this.abortQueued('Connection lost');
+    this.rx = '';
     if (this.job.state === 'running' || this.job.state === 'paused') {
       this.failJob('Connection lost during job');
     }
@@ -114,9 +120,18 @@ export class GrblController extends EventEmitter {
       const code = Number(line.slice(6));
       this.log('err', `${line}${GRBL_ALARMS[code] ? ` (${GRBL_ALARMS[code]})` : ''}`);
       if (this.job.state === 'running' || this.job.state === 'paused') this.failJob(`Alarm: ${line}`);
+      this.emit('alarm', code);
+    } else if (line.startsWith('[PRB:')) {
+      this.log('rx', line);
+      const m = /^\[PRB:([^:\]]*):(\d)\]$/.exec(line);
+      if (m) {
+        const [x = 0, y = 0, z = 0] = m[1].split(',').map(Number);
+        this.emit('prb', { pos: { x, y, z }, success: m[2] === '1' } satisfies ProbeHit);
+      }
     } else if (/^Grbl |^\[MSG:.*FluidNC|^\[VER:/i.test(line)) {
       // banner after (re)boot/reset: controller RX buffer is empty again
-      this.pending = []; this.used = 0;
+      this.abortPending('Controller reset');
+      this.emit('reset');
       this.connection = { ...this.connection, firmware: line };
       this.emit('connection', this.connection);
       this.log('rx', line);
@@ -130,6 +145,7 @@ export class GrblController extends EventEmitter {
     const p = this.pending.shift();
     if (!p) return;
     this.used -= p.len;
+    p.resolve?.({ ok: !isError, error: isError ? 'controller error' : undefined });
     if (p.job) {
       this.job = { ...this.job, doneLines: this.job.doneLines + 1 };
       if (isError) {
@@ -149,11 +165,54 @@ export class GrblController extends EventEmitter {
     if (!this.connection.connected) return this.log('err', 'Not connected');
     const l = line.trim();
     if (!l) return;
+    if (this.lock) return this.log('err', `Blocked: ${this.lock}`);
     if (l.startsWith('$J=') === false && (this.job.state === 'running' || this.job.state === 'paused')) {
       return this.log('err', 'Job in progress: command blocked');
     }
-    this.manualQueue.push(l);
+    this.manualQueue.push({ line: l });
     this.pump();
+  }
+
+  /**
+   * Internal send for server-driven sequences (probing). Bypasses the client
+   * lock. Resolves when the controller acknowledges the line; never rejects.
+   */
+  sendInternal(line: string): Promise<AckResult> {
+    if (!this.connection.connected) return Promise.resolve({ ok: false, error: 'Not connected' });
+    return new Promise((resolve) => {
+      this.manualQueue.push({ line, resolve });
+      this.pump();
+    });
+  }
+
+  /** Resolve when the machine reports Idle; reject on alarm, disconnect or timeout. */
+  waitIdle(timeoutMs = 180_000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const done = (err?: Error) => {
+        clearTimeout(timer);
+        this.off('status', onStatus); this.off('connection', onConn);
+        err ? reject(err) : resolve();
+      };
+      const onStatus = (s: MachineStatus) => {
+        if (s.state === 'Idle') done();
+        else if (s.state === 'Alarm') done(new Error('Machine in alarm'));
+      };
+      const onConn = (c: ConnectionInfo) => { if (!c.connected) done(new Error('Disconnected')); };
+      const timer = setTimeout(() => done(new Error('Timed out waiting for machine to stop')), timeoutMs);
+      this.on('status', onStatus); this.on('connection', onConn);
+    });
+  }
+
+  /** Drop everything queued or in flight, settling any awaiting callers as failed. */
+  private abortQueued(reason: string) {
+    const q = this.manualQueue; this.manualQueue = [];
+    q.forEach((e) => e.resolve?.({ ok: false, error: reason }));
+    this.abortPending(reason);
+  }
+
+  private abortPending(reason: string) {
+    const p = this.pending; this.pending = []; this.used = 0;
+    p.forEach((e) => e.resolve?.({ ok: false, error: reason }));
   }
 
   realtime(byte: string | number) {
@@ -166,8 +225,10 @@ export class GrblController extends EventEmitter {
     for (;;) {
       let line: string | undefined;
       let isJob = false;
+      let resolve: Queued['resolve'];
       if (this.manualQueue.length) {
-        line = this.manualQueue[0];
+        line = this.manualQueue[0].line;
+        resolve = this.manualQueue[0].resolve;
       } else if (this.job.state === 'running' && this.jobIndex < this.jobLines.length) {
         line = this.jobLines[this.jobIndex];
         isJob = true;
@@ -176,7 +237,7 @@ export class GrblController extends EventEmitter {
       const len = line.length + 1;
       if (this.used + len > RX_BUFFER) return;
       if (isJob) { this.jobIndex++; this.job = { ...this.job, sentLines: this.jobIndex }; } else this.manualQueue.shift();
-      this.pending.push({ len, job: isJob });
+      this.pending.push({ len, job: isJob, resolve });
       this.used += len;
       this.transport.write(line + '\n');
       this.log('tx', line);
@@ -186,6 +247,9 @@ export class GrblController extends EventEmitter {
 
   // ---------- commands from clients ----------
   handle(msg: ClientMessage) {
+    if (this.lock && !['hold', 'reset', 'jogCancel', 'override'].includes(msg.type)) {
+      return this.log('err', `Blocked: ${this.lock}`);
+    }
     switch (msg.type) {
       case 'send': return this.sendLine(msg.line);
       case 'jog': {
@@ -232,7 +296,8 @@ export class GrblController extends EventEmitter {
 
   softReset() {
     this.realtime(0x18);
-    this.pending = []; this.used = 0; this.manualQueue = [];
+    this.abortQueued('Machine reset');
+    this.emit('reset');
     if (this.job.state === 'running' || this.job.state === 'paused') this.failJob('Machine reset during job');
   }
 
@@ -273,7 +338,7 @@ export class GrblController extends EventEmitter {
         await new Promise((r) => setTimeout(r, 50));
       }
       this.realtime(0x18);
-      this.pending = []; this.used = 0; this.manualQueue = [];
+      this.abortQueued('Job stopped');
       this.job = { ...this.job, state: 'loaded', sentLines: 0, doneLines: 0, error: undefined };
       this.jobIndex = 0;
       this.log('sys', 'Job stopped. Machine reset: re-check position before restarting.');

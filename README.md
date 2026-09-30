@@ -4,7 +4,7 @@ Browser-based CNC controller by Prickly Guy Creations. One server owns the machi
 
 > V2 rewrite in progress. The original single-file prototype lives in [`v1-archive/`](v1-archive/).
 
-## Status: Milestone 1 (core)
+## Status: Milestone 2 (core + probing)
 
 - Serial connection owned by the server, shared by all browser clients
 - GRBL character-counting streaming, so large files stream at full speed
@@ -13,7 +13,14 @@ Browser-based CNC controller by Prickly Guy Creations. One server owns the machi
 - Feed / rapid / spindle overrides, console, dark and light themes
 - Built-in **simulator** so the whole stack runs without hardware
 
-Not yet built: probing (with the mandatory "probe connected" / "remove clamp" confirmations), autolevel, 3D visualizer, docking layout, Home Assistant, camera.
+### Probing
+- Z probe, PCB Z probe (direct contact) and 3-axis XYZ block probe, two-pass (fast then fine), ported from V1
+- **"Is the probe connected?"** confirmation before anything moves, with a live probe-input indicator (touch the bit to the plate to test it)
+- **"Remove the probe"** confirmation after every probe, including failed and cancelled ones
+- Enforced on the server: while a probe is active nothing can jog, home, send commands or start a job, from any client
+- Refuses to start if the probe input is already triggered; stale or double confirmations are ignored
+
+Not yet built: autolevel, 3D visualizer, docking layout, Home Assistant, camera.
 
 ## Run it
 

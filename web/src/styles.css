@@ -53,3 +53,20 @@ input:not([type=file]) { flex: 1; }
 .console { grid-column: 1 / -1; }
 .log { height: 220px; overflow-y: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 12px ui-monospace, Menlo, Consolas, monospace; }
 .log-tx { color: var(--accent); } .log-err { color: var(--danger); } .log-sys { color: var(--amber); } .log-rx { color: var(--muted); }
+
+.pform { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 8px; }
+.pform label { display: grid; grid-template-columns: 1fr 90px 52px; gap: 8px; align-items: center; }
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .72); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+.dialog { background: var(--panel); border: 3px solid var(--amber); border-radius: 12px; padding: 20px 24px; max-width: 520px; width: 100%; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 0 40px rgba(0, 0, 0, .6); }
+.dlg-red { border-color: var(--danger); }
+.dlg-kind { text-transform: uppercase; letter-spacing: 2px; font-size: 12px; color: var(--muted); }
+.dialog h3 { margin: 0; font-size: 24px; color: var(--amber); }
+.dlg-red h3 { color: var(--danger); }
+.dialog ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.dlg-step { font-size: 18px; font-weight: 700; }
+.mono { font: 15px ui-monospace, Menlo, Consolas, monospace; }
+.ok-line { color: var(--ok); font-weight: 700; }
+.pin { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; gap: 2px; }
+.pin b { font-size: 18px; }
+.pin-on { border-color: var(--ok); } .pin-on b { color: var(--ok); }
+.row.end { justify-content: flex-end; margin-top: 4px; }
