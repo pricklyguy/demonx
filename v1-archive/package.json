@@ -1,0 +1,17 @@
+{
+  "name": "demonx-server",
+  "version": "1.0.0",
+  "description": "DemonX CNC Controller Server - Serial bridge + RTSP proxy",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "install-deps": "npm install"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

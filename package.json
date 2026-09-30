@@ -1,17 +1,16 @@
 {
-  "name": "demonx-server",
-  "version": "1.0.0",
-  "description": "DemonX CNC Controller Server - Serial bridge + RTSP proxy",
-  "main": "server.js",
+  "name": "demonx",
+  "version": "2.0.0-dev",
+  "private": true,
+  "description": "DemonX CNC controller: server-owned GRBL connection, browser UI for any device on the network",
+  "workspaces": ["server", "web"],
   "scripts": {
-    "start": "node server.js",
-    "install-deps": "npm install"
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w web",
+    "start": "npm run start -w server",
+    "test": "npm test -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
   },
-  "dependencies": {
-    "serialport": "^12.0.0",
-    "ws": "^8.16.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "engines": { "node": ">=20" }
 }
