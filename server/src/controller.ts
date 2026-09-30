@@ -9,6 +9,8 @@ import type { Transport } from './transport.js';
 /** GRBL serial RX buffer is 128 bytes; keep one spare. FluidNC behaves the same. */
 const RX_BUFFER = 127;
 const POLL_MS = 200;
+/** Largest single Z jog accepted from any client (protects the wasteboard). */
+export const MAX_Z_JOG = 20;
 
 interface Pending { len: number; job: boolean }
 
@@ -188,8 +190,10 @@ export class GrblController extends EventEmitter {
       case 'send': return this.sendLine(msg.line);
       case 'jog': {
         if (this.job.state === 'running') return this.log('err', 'Cannot jog during a job');
+        const dz = msg.dz ? Math.max(-MAX_Z_JOG, Math.min(MAX_Z_JOG, msg.dz)) : 0;
+        if (msg.dz && dz !== msg.dz) this.log('sys', `Z jog limited to ${MAX_Z_JOG} mm`);
         const parts = [
-          msg.dx ? `X${msg.dx}` : '', msg.dy ? `Y${msg.dy}` : '', msg.dz ? `Z${msg.dz}` : '',
+          msg.dx ? `X${msg.dx}` : '', msg.dy ? `Y${msg.dy}` : '', dz ? `Z${dz}` : '',
         ].join('');
         if (!parts) return;
         return this.sendLine(`$J=G21G91${parts}F${msg.feed}`);

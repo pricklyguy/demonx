@@ -59,6 +59,15 @@ describe('controller + simulator', () => {
     await c.disconnect();
   });
 
+  it('limits Z jog to 20 mm', async () => {
+    const c = await setup();
+    c.handle({ type: 'jog', dz: 100, feed: 300 });
+    await until(() => c.status.mpos.z === 20);
+    c.handle({ type: 'jog', dz: -100, feed: 300 });
+    await until(() => c.status.mpos.z === 0);
+    await c.disconnect();
+  });
+
   it('pauses, resumes and stops a job', async () => {
     const c = await setup(1);
     c.loadJob('slow.nc', 'G21\nG90\nG1 X100 F600\nG1 X0 F600');

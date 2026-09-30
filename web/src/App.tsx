@@ -119,34 +119,64 @@ function DroPanel({ m }: { m: Machine }) {
   );
 }
 
-const STEPS = [0.01, 0.1, 1, 10, 50];
+const XY_STEPS = [0.01, 0.1, 1, 10, 50];
+const Z_STEPS = [0.01, 0.1, 1, 5, 10, 20];
+const MAX_Z_JOG = 20; // mm, also enforced on the server
+
+/** Persist a small per-browser setting (jog step, feed). */
+function useSaved(key: string, initial: number): [number, (n: number) => void] {
+  const [v, setV] = useState(() => {
+    const n = Number(localStorage.getItem(key));
+    return n > 0 ? n : initial;
+  });
+  return [v, (n) => { setV(n); localStorage.setItem(key, String(n)); }];
+}
+
+// Defined at module level on purpose: a component defined inside another
+// component gets a new identity on every render, which remounts the button
+// and swallows clicks whenever a status update lands mid-click.
+function JogBtn({ label, disabled, onJog, className = '' }: { label: string; disabled: boolean; onJog: () => void; className?: string }) {
+  return <button className={`btn jog ${className}`} disabled={disabled} onClick={onJog}>{label}</button>;
+}
 
 function JogPanel({ m }: { m: Machine }) {
-  const [step, setStep] = useState(1);
-  const [feed, setFeed] = useState(1000);
+  const [step, setStep] = useSaved('jogStep', 1);
+  const [feed, setFeed] = useSaved('jogFeed', 1000);
+  const [zStep, setZStep] = useSaved('jogZStep', 1);
+  const [zFeed, setZFeed] = useSaved('jogZFeed', 300);
   const off = !m.connection.connected || m.job.state === 'running';
-  const jog = (dx = 0, dy = 0, dz = 0) => m.send({ type: 'jog', dx: dx * step, dy: dy * step, dz: dz * step, feed });
-  const B = ({ label, dx, dy, dz }: { label: string; dx?: number; dy?: number; dz?: number }) => (
-    <button className="btn jog" disabled={off} onClick={() => jog(dx, dy, dz)}>{label}</button>
-  );
+  const jog = (dx = 0, dy = 0) => () => m.send({ type: 'jog', dx: dx * step, dy: dy * step, feed });
+  const jogZ = (dir: number) => () => m.send({ type: 'jog', dz: dir * Math.min(zStep, MAX_Z_JOG), feed: zFeed });
   return (
     <Panel title="Jog">
       <div className="jogwrap">
         <div className="pad">
-          <B label="↖" dx={-1} dy={1} /><B label="Y+" dy={1} /><B label="↗" dx={1} dy={1} />
-          <B label="X−" dx={-1} /><button className="btn jog stopjog" disabled={off} onClick={() => m.send({ type: 'jogCancel' })}>■</button><B label="X+" dx={1} />
-          <B label="↙" dx={-1} dy={-1} /><B label="Y−" dy={-1} /><B label="↘" dx={1} dy={-1} />
+          <JogBtn label="↖" disabled={off} onJog={jog(-1, 1)} /><JogBtn label="Y+" disabled={off} onJog={jog(0, 1)} /><JogBtn label="↗" disabled={off} onJog={jog(1, 1)} />
+          <JogBtn label="X−" disabled={off} onJog={jog(-1, 0)} /><JogBtn label="■" className="stopjog" disabled={off} onJog={() => m.send({ type: 'jogCancel' })} /><JogBtn label="X+" disabled={off} onJog={jog(1, 0)} />
+          <JogBtn label="↙" disabled={off} onJog={jog(-1, -1)} /><JogBtn label="Y−" disabled={off} onJog={jog(0, -1)} /><JogBtn label="↘" disabled={off} onJog={jog(1, -1)} />
         </div>
-        <div className="zpad"><B label="Z+" dz={1} /><B label="Z−" dz={-1} /></div>
+        <div className="zpad">
+          <JogBtn label="Z+" disabled={off} onJog={jogZ(1)} />
+          <JogBtn label="Z−" disabled={off} onJog={jogZ(-1)} />
+        </div>
       </div>
       <div className="row wrap">
-        <span className="muted">Step</span>
-        {STEPS.map((s) => <button key={s} className={`btn small ${s === step ? 'primary' : ''}`} onClick={() => setStep(s)}>{s}</button>)}
+        <span className="muted lbl">XY step</span>
+        {XY_STEPS.map((s) => <button key={s} className={`btn small ${s === step ? 'primary' : ''}`} onClick={() => setStep(s)}>{s}</button>)}
       </div>
       <div className="row">
-        <span className="muted">Feed</span>
+        <span className="muted lbl">XY feed</span>
         <input type="number" value={feed} min={1} onChange={(e) => setFeed(Number(e.target.value))} /> <span className="muted">mm/min</span>
       </div>
+      <div className="row wrap zrow">
+        <span className="muted lbl">Z step</span>
+        {Z_STEPS.map((s) => <button key={s} className={`btn small ${s === zStep ? 'primary' : ''}`} onClick={() => setZStep(s)}>{s}</button>)}
+      </div>
+      <div className="row">
+        <span className="muted lbl">Z feed</span>
+        <input type="number" value={zFeed} min={1} onChange={(e) => setZFeed(Number(e.target.value))} /> <span className="muted">mm/min</span>
+      </div>
+      <div className="muted small">Z jog is capped at {MAX_Z_JOG} mm per press.</div>
     </Panel>
   );
 }

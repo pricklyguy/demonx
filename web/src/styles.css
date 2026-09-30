@@ -48,6 +48,8 @@ input:not([type=file]) { flex: 1; }
 .job .row.muted { justify-content: space-between; }
 .err { color: var(--danger); font-weight: 600; }
 .ovlabel { width: 110px; }
+.lbl { width: 54px; }
+.zrow { padding-top: 6px; border-top: 1px dashed var(--line); }
 .console { grid-column: 1 / -1; }
 .log { height: 220px; overflow-y: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 12px ui-monospace, Menlo, Consolas, monospace; }
 .log-tx { color: var(--accent); } .log-err { color: var(--danger); } .log-sys { color: var(--amber); } .log-rx { color: var(--muted); }
