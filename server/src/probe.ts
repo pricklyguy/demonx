@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ProbeInfo, ProbeKind, ProbePhase, ProbeSettings, Vec3 } from '../../shared/protocol.js';
+import type { AutolevelParams, HeightMap, ProbeInfo, ProbeKind, ProbePhase, ProbeSettings, Vec3 } from '../../shared/protocol.js';
 import { emptyProbe } from '../../shared/protocol.js';
 import type { GrblController, ProbeHit } from './controller.js';
 import { GRBL_ALARMS } from './parser.js';
@@ -31,6 +31,17 @@ const RANGES: Record<keyof ProbeSettings, [number, number]> = {
   retract: [0.5, 10], clearance: [1, 100],
 };
 
+export function validateAutolevel(a: AutolevelParams): string | null {
+  if (!a || typeof a !== 'object') return 'missing scan settings';
+  if (![a.cols, a.rows].every((v) => Number.isInteger(v) && v >= 2 && v <= 30)) return 'grid must be 2 to 30 points each way';
+  const area = [a.minX, a.maxX, a.minY, a.maxY];
+  if (!area.every((v) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 2000)) return 'invalid scan area';
+  if (!(a.maxX > a.minX) || !(a.maxY > a.minY)) return 'the scan area has no size';
+  if (!(typeof a.safeZ === 'number' && a.safeZ >= 0.5 && a.safeZ <= 50)) return 'safe height must be between 0.5 and 50 mm';
+  if (!(typeof a.depth === 'number' && a.depth >= 0.5 && a.depth <= 10)) return 'probe depth must be between 0.5 and 10 mm';
+  return null;
+}
+
 export function validateSettings(s: ProbeSettings): string | null {
   for (const [k, [lo, hi]] of Object.entries(RANGES)) {
     const v = (s as unknown as Record<string, unknown>)[k];
@@ -58,6 +69,15 @@ const KINDS: Record<ProbeKind, { title: string; checklist: string[] }> = {
       'Bit is roughly 15 mm above the board, over bare copper',
     ],
   },
+  autolevel: {
+    title: 'Autolevel Scan',
+    checklist: [
+      'Ground clip is attached to the bit',
+      'Z zero is set on the board surface (run the PCB Z probe first) and X/Y zero is set',
+      'Board is clamped flat, and clamps and the clip lead are clear of the whole scan area',
+      'Bit is above the board',
+    ],
+  },
   xyz: {
     title: '3-Axis Probe',
     checklist: [
@@ -73,6 +93,7 @@ const n = (v: number) => String(Number(v.toFixed(4)));
 export class ProbeManager extends EventEmitter {
   info: ProbeInfo = emptyProbe();
   private settings?: ProbeSettings;
+  private autolevel?: AutolevelParams;
   private cancelled = false;
 
   constructor(private ctl: GrblController) {
@@ -84,22 +105,23 @@ export class ProbeManager extends EventEmitter {
   }
 
   // ---------- requests from clients ----------
-  start(kind: ProbeKind, settings: ProbeSettings) {
+  start(kind: ProbeKind, settings: ProbeSettings, autolevel?: AutolevelParams) {
     const fail = (m: string) => this.ctl.log('err', `Probe not started: ${m}`);
     if (this.info.phase !== 'idle') return fail('a probe is already active');
     if (!KINDS[kind]) return fail('unknown probe type');
     if (!this.ctl.connection.connected) return fail('not connected');
     if (this.ctl.job.state === 'running' || this.ctl.job.state === 'paused') return fail('a job is running');
     if (this.ctl.status.state !== 'Idle') return fail(`machine is ${this.ctl.status.state}, not Idle`);
-    const bad = validateSettings(settings);
+    const bad = validateSettings(settings) ?? (kind === 'autolevel' ? validateAutolevel(autolevel as AutolevelParams) : null);
     if (bad) return fail(bad);
 
     this.settings = { ...settings };
+    this.autolevel = autolevel ? { ...autolevel } : undefined;
     this.cancelled = false;
     this.ctl.lock = LOCK_REASON;
     this.set({
       id: this.info.id + 1, phase: 'confirmConnect', kind, title: KINDS[kind].title,
-      checklist: KINDS[kind].checklist, step: undefined, result: undefined, success: undefined, error: undefined,
+      checklist: KINDS[kind].checklist, step: undefined, progress: undefined, result: undefined, success: undefined, error: undefined,
     });
     this.ctl.log('sys', `${KINDS[kind].title}: waiting for confirmation that the probe is connected`);
   }
@@ -146,6 +168,7 @@ export class ProbeManager extends EventEmitter {
       await this.cmd('Setting relative mode', 'G91');
       if (kind === 'z') await this.zCycle(s, s.plateZ, s.clearance);
       else if (kind === 'pcb') await this.zCycle(s, 0, s.clearance);
+      else if (kind === 'autolevel') await this.gridCycle(s, this.autolevel!);
       else await this.xyzCycle(s);
       await this.cmd('Restoring absolute mode', 'G90');
       this.ctl.log('sys', `${this.info.title} complete`);
@@ -200,6 +223,54 @@ export class ProbeManager extends EventEmitter {
     await this.move('Lifting clear of the block', `G0 Z${n(lift)}`);
     await this.cmd('Absolute mode', 'G90');
     await this.move('Moving to X0 Y0', 'G0 X0 Y0');
+  }
+
+  /**
+   * Autolevel scan: probe a grid of points and record the surface height at each,
+   * in work coordinates (so 0 means "at Z0"). Any point that fails aborts the whole
+   * scan: a missing height quietly treated as flat would cut at the wrong depth.
+   */
+  private async gridCycle(s: ProbeSettings, a: AutolevelParams) {
+    const total = a.cols * a.rows;
+    const z: number[][] = Array.from({ length: a.rows }, () => Array<number>(a.cols).fill(NaN));
+    const wco = { ...this.ctl.status.wco };
+    await this.cmd('Absolute mode', 'G90');
+    let done = 0;
+    for (let row = 0; row < a.rows; row++) {
+      // snake order keeps travel short
+      const cols = [...Array(a.cols).keys()];
+      if (row % 2) cols.reverse();
+      for (const col of cols) {
+        const x = a.minX + ((a.maxX - a.minX) * col) / (a.cols - 1);
+        const y = a.minY + ((a.maxY - a.minY) * row) / (a.rows - 1);
+        done++;
+        const at = `point ${done}/${total} (X${n(x)} Y${n(y)})`;
+        this.set({ progress: { current: done, total } });
+        await this.move(`Moving to ${at}`, `G90 G0 Z${n(a.safeZ)}`);
+        await this.move(`Moving to ${at}`, `G90 G0 X${n(x)} Y${n(y)}`);
+        if (this.ctl.status.pins.includes('P')) {
+          throw new Error(`The probe input is triggered at ${at} before probing. The board may be higher than the safe height, or the clip is shorted.`);
+        }
+        try {
+          await this.probe(`Probing ${at}`, `G90 G38.2 Z-${n(a.depth)} F${n(s.feedFast)}`, a.safeZ + a.depth, s.feedFast);
+          await this.move(`Retracting at ${at}`, `G91 G0 Z${n(s.retract)}`);
+          const hit = await this.probe(`Fine probe ${at}`, `G38.2 Z-${n(s.retract + 1)} F${n(s.feedFine)}`, s.retract + 1, s.feedFine);
+          await this.cmd('Absolute mode', 'G90');
+          z[row][col] = hit.z - this.ctl.status.wco.z;
+        } catch (e) {
+          if (this.cancelled) throw e;
+          throw new Error(`Scan failed at ${at}: ${(e as Error).message}`);
+        }
+      }
+    }
+    await this.move('Lifting to safe height', `G90 G0 Z${n(a.safeZ)}`);
+    const map: HeightMap = {
+      cols: a.cols, rows: a.rows, minX: a.minX, maxX: a.maxX, minY: a.minY, maxY: a.maxY,
+      z, scannedAt: Date.now(), wco,
+    };
+    this.emit('heightmap', map);
+    const flat = z.flat();
+    this.ctl.log('sys', `Autolevel scan done: surface varies ${(Math.max(...flat) - Math.min(...flat)).toFixed(3)} mm over ${total} points`);
   }
 
   // ---------- step helpers ----------

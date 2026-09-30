@@ -72,3 +72,13 @@ input:not([type=file]) { flex: 1; }
 .pin b { font-size: 18px; }
 .pin-on { border-color: var(--ok); } .pin-on b { color: var(--ok); }
 .row.end { justify-content: flex-end; margin-top: 4px; }
+
+.heat { display: grid; gap: 2px; }
+.heat .cell { padding: 6px 2px; text-align: center; font: 11px ui-monospace, Menlo, Consolas, monospace; border-radius: 3px; border: 1px solid var(--line); }
+.badge { padding: 5px 10px; border-radius: 6px; font-size: 12px; font-weight: 700; }
+.badge-ok { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); border: 1px solid var(--ok); }
+.badge-warn { background: color-mix(in srgb, var(--amber) 22%, transparent); color: var(--amber); border: 1px solid var(--amber); }
+.lvl { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.warn-line { color: var(--amber); font-weight: 600; }
+a.btn { text-decoration: none; display: inline-block; }
+details > summary { cursor: pointer; padding: 2px 0; }

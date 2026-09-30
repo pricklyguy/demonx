@@ -38,6 +38,26 @@ export interface MachineStatus {
 
 export type JobState = 'none' | 'loaded' | 'running' | 'paused' | 'done' | 'error';
 
+export interface Bounds { minX: number; maxX: number; minY: number; maxY: number }
+
+/** Result of applying a height map to a program */
+export interface LevelSummary {
+  cols: number;
+  rows: number;
+  linesBefore: number;
+  linesAfter: number;
+  /** Smallest and largest Z correction added to the program, mm */
+  minDelta: number;
+  maxDelta: number;
+  /** Cutting/rapid endpoints outside the scanned area (clamped to its edge) */
+  outside: number;
+  /** Work zero moved since the scan: heights may no longer match the surface */
+  zeroChanged: boolean;
+  scannedAt: number;
+  /** Things worth a look, e.g. Z moves that could not be corrected */
+  warnings: string[];
+}
+
 export interface JobInfo {
   state: JobState;
   name: string;
@@ -49,6 +69,12 @@ export interface JobInfo {
   startedAt?: number;
   elapsedMs: number;
   error?: string;
+  /** XY extent of the program (work coordinates), when it could be worked out */
+  bounds?: Bounds;
+  /** Set when the running program is an autolevelled version of the loaded file */
+  leveled?: LevelSummary;
+  /** Why the last attempt to apply autolevel was refused (the loaded program is unchanged) */
+  levelError?: string;
 }
 
 export interface ConnectionInfo {
@@ -72,7 +98,7 @@ export interface LogLine {
   text: string;
 }
 
-export type ProbeKind = 'z' | 'xyz' | 'pcb';
+export type ProbeKind = 'z' | 'xyz' | 'pcb' | 'autolevel';
 /**
  * idle -> confirmConnect (user must confirm the probe is connected)
  *      -> running (server drives the probe cycle)
@@ -99,6 +125,29 @@ export interface ProbeSettings {
   clearance: number;
 }
 
+/**
+ * Surface heights measured by an autolevel scan, in work coordinates.
+ * z[row][col] is the surface height relative to work Z0; row 0 is minY.
+ */
+export interface HeightMap {
+  cols: number;
+  rows: number;
+  minX: number; maxX: number; minY: number; maxY: number;
+  z: number[][];
+  scannedAt: number;
+  /** Work coordinate offset when scanned, to detect a moved zero later */
+  wco?: Vec3;
+}
+
+export interface AutolevelParams extends Bounds {
+  cols: number;
+  rows: number;
+  /** Height above Z0 the tool travels at between points */
+  safeZ: number;
+  /** How far below Z0 a probe may travel before the scan fails */
+  depth: number;
+}
+
 export interface ProbeInfo {
   /** Increments per probe run; confirmations must quote it so stale clicks are ignored */
   id: number;
@@ -108,6 +157,8 @@ export interface ProbeInfo {
   checklist?: string[];
   /** Current step while running */
   step?: string;
+  /** Autolevel scan progress */
+  progress?: { current: number; total: number };
   /** Machine-position contact points recorded so far */
   result?: Partial<Vec3>;
   success?: boolean;
@@ -121,6 +172,7 @@ export interface Snapshot {
   status: MachineStatus;
   job: JobInfo;
   probe: ProbeInfo;
+  heightmap: HeightMap | null;
   clients: number;
   log: LogLine[];
 }
@@ -131,6 +183,7 @@ export type ServerMessage =
   | { type: 'status'; data: MachineStatus }
   | { type: 'job'; data: JobInfo }
   | { type: 'probe'; data: ProbeInfo }
+  | { type: 'heightmap'; data: HeightMap | null }
   | { type: 'connection'; data: ConnectionInfo }
   | { type: 'clients'; data: number }
   | { type: 'log'; data: LogLine }
@@ -160,7 +213,13 @@ export type ClientMessage =
   | { type: 'jobPause' }
   | { type: 'jobResume' }
   | { type: 'jobStop' }
-  | { type: 'probeStart'; kind: ProbeKind; settings: ProbeSettings }
+  | { type: 'probeStart'; kind: ProbeKind; settings: ProbeSettings; autolevel?: AutolevelParams }
+  | { type: 'heightmapLoad'; map: HeightMap }
+  | { type: 'heightmapClear' }
+  /** Rewrite the loaded program with the current height map applied */
+  | { type: 'jobLevel' }
+  /** Go back to the program as loaded from file */
+  | { type: 'jobRevert' }
   | { type: 'probeConfirm'; id: number; phase: ProbePhase }
   | { type: 'probeCancel'; id: number };
 

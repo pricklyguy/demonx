@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
-  ClientMessage, ConnectionInfo, JobInfo, LogLine, MachineStatus, PortInfo, ProbeInfo, ServerMessage,
+  ClientMessage, ConnectionInfo, HeightMap, JobInfo, LogLine, MachineStatus, PortInfo, ProbeInfo, ServerMessage,
 } from '../../shared/protocol';
 import { emptyJob, emptyProbe, emptyStatus } from '../../shared/protocol';
 
@@ -10,6 +10,7 @@ export interface Machine {
   status: MachineStatus;
   job: JobInfo;
   probe: ProbeInfo;
+  heightmap: HeightMap | null;
   clients: number;
   log: LogLine[];
   ports: PortInfo[];
@@ -22,6 +23,7 @@ export function useMachine(): Machine {
   const [status, setStatus] = useState<MachineStatus>(emptyStatus());
   const [job, setJob] = useState<JobInfo>(emptyJob());
   const [probe, setProbe] = useState<ProbeInfo>(emptyProbe());
+  const [heightmap, setHeightmap] = useState<HeightMap | null>(null);
   const [clients, setClients] = useState(0);
   const [log, setLog] = useState<LogLine[]>([]);
   const [ports, setPorts] = useState<PortInfo[]>([]);
@@ -43,11 +45,12 @@ export function useMachine(): Machine {
         const m: ServerMessage = JSON.parse(ev.data);
         switch (m.type) {
           case 'snapshot':
-            setConnection(m.data.connection); setStatus(m.data.status); setJob(m.data.job); setProbe(m.data.probe);
+            setConnection(m.data.connection); setStatus(m.data.status); setJob(m.data.job); setProbe(m.data.probe); setHeightmap(m.data.heightmap);
             setClients(m.data.clients); setLog(m.data.log); break;
           case 'status': setStatus(m.data); break;
           case 'job': setJob(m.data); break;
           case 'probe': setProbe(m.data); break;
+          case 'heightmap': setHeightmap(m.data); break;
           case 'connection': setConnection(m.data); break;
           case 'clients': setClients(m.data); break;
           case 'log': setLog((l) => [...l.slice(-299), m.data]); break;
@@ -63,5 +66,5 @@ export function useMachine(): Machine {
     if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify(m));
   }, []);
 
-  return { online, connection, status, job, probe, clients, log, ports, send };
+  return { online, connection, status, job, probe, heightmap, clients, log, ports, send };
 }

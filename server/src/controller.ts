@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events';
 import type {
-  ConnectionInfo, JobInfo, LogKind, LogLine, MachineStatus, ClientMessage, Vec3,
+  ConnectionInfo, HeightMap, JobInfo, LevelSummary, LogKind, LogLine, MachineStatus, ClientMessage, Vec3,
 } from '../../shared/protocol.js';
 import { emptyJob, emptyStatus } from '../../shared/protocol.js';
 import { GRBL_ALARMS, GRBL_ERRORS, cleanGcode, parseStatus } from './parser.js';
 import type { Transport } from './transport.js';
+import { GcodeError, levelProgram } from './gcode.js';
 
 /** GRBL serial RX buffer is 128 bytes; keep one spare. FluidNC behaves the same. */
 const RX_BUFFER = 127;
@@ -45,6 +46,10 @@ export class GrblController extends EventEmitter {
   /** When set, client commands that could move the machine are refused (e.g. mid-probe). */
   lock?: string;
   private jobLines: string[] = [];
+  /** The program as loaded from file, kept so autolevel can be applied or undone */
+  private jobSource?: { name: string; content: string };
+  /** Supplies the current height map (set by the server) */
+  heightMap?: () => HeightMap | null;
   private jobIndex = 0;
   private stopping = false;
 
@@ -286,6 +291,8 @@ export class GrblController extends EventEmitter {
         return b !== undefined ? this.realtime(b) : undefined;
       }
       case 'jobLoad': return this.loadJob(msg.name, msg.content);
+      case 'jobLevel': return this.levelJob(this.heightMap?.() ?? null);
+      case 'jobRevert': return this.revertJob();
       case 'jobStart': return this.startJob();
       case 'jobPause': return this.hold();
       case 'jobResume': return this.resume();
@@ -315,12 +322,66 @@ export class GrblController extends EventEmitter {
     if (this.job.state === 'running' || this.job.state === 'paused') {
       return this.log('err', 'Cannot load a file while a job is running');
     }
+    this.jobSource = { name, content };
     this.jobLines = content.split(/\r?\n/).map(cleanGcode).filter(Boolean);
     this.jobIndex = 0;
-    this.job = { ...emptyJob(), state: 'loaded', name, totalLines: this.jobLines.length };
+    let bounds;
+    try { bounds = levelProgram(content.split(/\r?\n/), null).bounds; } catch { /* unsupported for autolevel; still runnable */ }
+    this.job = { ...emptyJob(), state: 'loaded', name, totalLines: this.jobLines.length, bounds };
     this.log('sys', `Loaded ${name}: ${this.jobLines.length} lines`);
     this.emitJob();
   }
+
+  /** Replace the loaded program with a copy that has the height map applied. */
+  levelJob(map: HeightMap | null) {
+    if (this.job.state === 'running' || this.job.state === 'paused') return this.log('err', 'Cannot change the program while a job is running');
+    if (this.lock) return this.log('err', `Blocked: ${this.lock}`);
+    if (!this.jobSource) return this.log('err', 'Load a G-code file first');
+    if (!map) return this.log('err', 'No height map: run an autolevel scan or load a saved one');
+    if (this.job.levelError) { this.job = { ...this.job, levelError: undefined }; }
+    const { name, content } = this.jobSource;
+    const src = content.split(/\r?\n/);
+    let result;
+    try {
+      result = levelProgram(src, map);
+    } catch (e) {
+      if (e instanceof GcodeError) {
+        this.job = { ...this.job, levelError: e.message };
+        this.emitJob();
+        return this.log('err', `Autolevel not applied. ${e.message}`);
+      }
+      throw e;
+    }
+    const wco = this.status.wco;
+    const zeroChanged = !!map.wco && (Math.abs(map.wco.x - wco.x) > 0.05 || Math.abs(map.wco.y - wco.y) > 0.05 || Math.abs(map.wco.z - wco.z) > 0.05);
+    const warnings: string[] = [];
+    if (result.stats.outside) warnings.push(`${result.stats.outside} cutting points lie outside the scanned area and use the nearest edge height`);
+    if (result.stats.uncorrected) warnings.push(`${result.stats.uncorrected} Z move(s) before the first XY position were left as written`);
+    if (zeroChanged) warnings.push('Work zero has moved since the scan. If you did not re-zero on the same surface point, rescan');
+    const lines = result.lines.map(cleanGcode).filter(Boolean);
+    const summary: LevelSummary = {
+      cols: map.cols, rows: map.rows, linesBefore: this.jobLines.length, linesAfter: lines.length,
+      minDelta: result.stats.minDelta, maxDelta: result.stats.maxDelta, outside: result.stats.outside,
+      zeroChanged, scannedAt: map.scannedAt, warnings,
+    };
+    const dot = name.lastIndexOf('.');
+    const leveledName = dot > 0 ? `${name.slice(0, dot)}.leveled${name.slice(dot)}` : `${name}.leveled.nc`;
+    this.jobLines = lines;
+    this.jobIndex = 0;
+    this.job = { ...emptyJob(), state: 'loaded', name: leveledName, totalLines: lines.length, bounds: result.bounds, leveled: summary };
+    this.log('sys', `Autolevel applied to ${name}: ${summary.linesBefore} to ${summary.linesAfter} lines, Z corrected by ${summary.minDelta.toFixed(3)} to ${summary.maxDelta.toFixed(3)} mm`);
+    for (const w of warnings) this.log('err', `Autolevel: ${w}`);
+    this.emitJob();
+  }
+
+  /** Go back to the program exactly as loaded from file. */
+  revertJob() {
+    if (!this.jobSource) return this.log('err', 'Load a G-code file first');
+    this.loadJob(this.jobSource.name, this.jobSource.content);
+  }
+
+  /** The program that will be streamed (cleaned lines), for download. */
+  jobText(): string { return this.jobLines.join('\n') + '\n'; }
 
   startJob() {
     if (!this.connection.connected) return this.log('err', 'Not connected');

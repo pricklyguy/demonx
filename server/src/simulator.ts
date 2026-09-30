@@ -46,6 +46,8 @@ export class SimulatorTransport extends EventEmitter implements Transport {
   /** Whether the probe is wired up. When false it never triggers. */
   probeConnected = true;
   surfaces: SimSurfaces = { zTop: -10, xFace: -8, yFace: -8 };
+  /** When set, the probe touches this surface (machine Z at machine x,y) instead of the corner block. */
+  surfaceFn?: (x: number, y: number) => number;
 
   /** speed multiplier so tests do not have to run in real time */
   constructor(private speed = 1) { super(); }
@@ -174,6 +176,7 @@ export class SimulatorTransport extends EventEmitter implements Transport {
   private probeTriggered(at: Vec = this.pos): boolean {
     if (!this.probeConnected) return false;
     if (this.touched) return true;
+    if (this.surfaceFn) return at.z <= this.surfaceFn(at.x, at.y) + 1e-9;
     const e = 1e-6;
     const { zTop, xFace, yFace } = this.surfaces;
     return at.x >= xFace - e && at.y >= yFace - e && at.z <= zTop + e;
@@ -186,6 +189,7 @@ export class SimulatorTransport extends EventEmitter implements Transport {
    */
   private contact(axis: 'x' | 'y' | 'z', p: Vec): Vec | undefined {
     if (!this.probeTriggered(p)) return undefined;
+    if (this.surfaceFn) return axis === 'z' ? { ...p, z: this.surfaceFn(p.x, p.y) } : undefined;
     const { zTop, xFace, yFace } = this.surfaces;
     if (axis !== 'z' && p.z > zTop - SIDE_MARGIN) return undefined;
     return { ...p, [axis]: axis === 'z' ? zTop : axis === 'x' ? xFace : yFace };

@@ -3,5 +3,5 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  server: { host: true, proxy: { '/ws': { target: 'ws://localhost:8080', ws: true } }, fs: { allow: ['..'] } },
+  server: { host: true, proxy: { '/ws': { target: 'ws://localhost:8080', ws: true }, '/api': 'http://localhost:8080' }, fs: { allow: ['..'] } },
 });

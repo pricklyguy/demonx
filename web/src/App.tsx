@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Machine } from './useMachine';
 import { useMachine } from './useMachine';
-import type { JogAxis, ProbeKind, ProbeSettings } from '../../shared/protocol';
+import type { AutolevelParams, HeightMap, JogAxis, ProbeKind, ProbeSettings } from '../../shared/protocol';
 
 const fmt = (n: number) => n.toFixed(3);
 const savedNum = (key: string, fallback: number) => Number(localStorage.getItem(key)) || fallback;
@@ -27,6 +27,7 @@ export function App() {
         <JogPanel m={m} />
         <JobPanel m={m} />
         <ProbePanel m={m} />
+        <AutolevelPanel m={m} />
         <OverridePanel m={m} />
         <ConsolePanel m={m} />
       </main>
@@ -202,6 +203,9 @@ function JobPanel({ m }: { m: Machine }) {
         <button className="btn" disabled={running} onClick={() => file.current?.click()}>Open G-code…</button>
         <b>{j.name || 'No file loaded'}</b>
       </div>
+      {j.leveled
+        ? <div className="badge badge-ok">AUTOLEVELLED · Z corrected {j.leveled.minDelta.toFixed(2)} to {j.leveled.maxDelta.toFixed(2)} mm</div>
+        : m.heightmap && j.state !== 'none' && <div className="badge badge-warn">A height map exists but is NOT applied to this program</div>}
       <div className="bar"><div style={{ width: `${pct}%` }} /></div>
       <div className="row muted small">
         <span>{j.state.toUpperCase()}</span><span>{j.doneLines}/{j.totalLines} lines ({pct}%)</span><span>{fmtTime(j.elapsedMs)}</span>
@@ -284,10 +288,12 @@ const PROBE_FIELDS: { key: keyof ProbeForm; label: string; unit: string }[] = [
   { key: 'clearance_xyz', label: 'XYZ probe: end height', unit: 'mm' },
 ];
 
+function loadProbeForm(): ProbeForm {
+  try { return { ...PROBE_DEFAULTS, ...JSON.parse(localStorage.getItem('probeForm') ?? '{}') }; } catch { return PROBE_DEFAULTS; }
+}
+
 function useProbeForm(): [ProbeForm, (k: keyof ProbeForm, v: number) => void] {
-  const [f, setF] = useState<ProbeForm>(() => {
-    try { return { ...PROBE_DEFAULTS, ...JSON.parse(localStorage.getItem('probeForm') ?? '{}') }; } catch { return PROBE_DEFAULTS; }
-  });
+  const [f, setF] = useState<ProbeForm>(loadProbeForm);
   const set = (k: keyof ProbeForm, v: number) => {
     const next = { ...f, [k]: v };
     setF(next);
@@ -340,6 +346,7 @@ const REMOVE_TEXT: Record<ProbeKind, string> = {
   z: 'Remove the probe clip from the bit and take the plate off the work surface.',
   pcb: 'Remove the ground clip from the bit.',
   xyz: 'Remove the probe clip from the bit and take the touch block off the work surface.',
+  autolevel: 'Remove the ground clip from the bit before cutting.',
 };
 
 function ProbeDialog({ m }: { m: Machine }) {
@@ -356,11 +363,11 @@ function ProbeDialog({ m }: { m: Machine }) {
 
         {p.phase === 'confirmConnect' && (
           <>
-            <h3>{p.kind === 'pcb' ? 'IS YOUR GROUND CONNECTED?' : 'IS THE PROBE CONNECTED?'}</h3>
+            <h3>{p.kind === 'pcb' || p.kind === 'autolevel' ? 'IS YOUR GROUND CONNECTED?' : 'IS THE PROBE CONNECTED?'}</h3>
             <ul>{p.checklist?.map((c) => <li key={c}>{c}</li>)}</ul>
             <div className={`pin ${triggered ? 'pin-on' : ''}`}>
               Probe input: <b>{triggered ? 'TRIGGERED' : 'OPEN'}</b>
-              <span className="small"> Touch the bit to the {p.kind === 'pcb' ? 'board' : 'plate'} to test the connection: it should read TRIGGERED, then OPEN again when released.</span>
+              <span className="small"> Touch the bit to the {p.kind === 'pcb' || p.kind === 'autolevel' ? 'board' : 'plate'} to test the connection: it should read TRIGGERED, then OPEN again when released.</span>
             </div>
             <div className="row end">
               <button className="btn" onClick={() => m.send({ type: 'probeCancel', id: p.id })}>Cancel</button>
@@ -373,6 +380,7 @@ function ProbeDialog({ m }: { m: Machine }) {
           <>
             <h3>PROBING…</h3>
             <div className="dlg-step">{p.step}</div>
+            {p.progress && <div className="bar"><div style={{ width: `${Math.round((p.progress.current / p.progress.total) * 100)}%` }} /></div>}
             {results && <div className="mono">{results}</div>}
             <div className="muted small">Keep your hand near the stop button. The machine is moving.</div>
             <div className="row end">
@@ -396,5 +404,132 @@ function ProbeDialog({ m }: { m: Machine }) {
         )}
       </div>
     </div>
+  );
+}
+
+// ---------------- Autolevel ----------------
+
+const AL_DEFAULTS = { minX: 0, maxX: 50, minY: 0, maxY: 50, cols: 5, rows: 5, safeZ: 2, depth: 2 };
+type AlForm = typeof AL_DEFAULTS;
+const AL_FIELDS: { key: keyof AlForm; label: string; unit: string; step?: string }[] = [
+  { key: 'minX', label: 'X from', unit: 'mm' }, { key: 'maxX', label: 'X to', unit: 'mm' },
+  { key: 'minY', label: 'Y from', unit: 'mm' }, { key: 'maxY', label: 'Y to', unit: 'mm' },
+  { key: 'cols', label: 'Points in X', unit: '', step: '1' }, { key: 'rows', label: 'Points in Y', unit: '', step: '1' },
+  { key: 'safeZ', label: 'Travel height above Z0', unit: 'mm' }, { key: 'depth', label: 'Max probe depth below Z0', unit: 'mm' },
+];
+
+function HeatGrid({ map }: { map: HeightMap }) {
+  const flat = map.z.flat();
+  const lo = Math.min(...flat), hi = Math.max(...flat), span = hi - lo || 1;
+  const rows = [...Array(map.rows).keys()].reverse(); // Y increases upward, like the machine
+  return (
+    <div className="heat" style={{ gridTemplateColumns: `repeat(${map.cols}, 1fr)` }}>
+      {rows.flatMap((j) => [...Array(map.cols).keys()].map((i) => {
+        const z = map.z[j][i];
+        const t = (z - lo) / span;
+        const x = map.minX + ((map.maxX - map.minX) * i) / (map.cols - 1);
+        const y = map.minY + ((map.maxY - map.minY) * j) / (map.rows - 1);
+        return (
+          <div key={`${i}-${j}`} className="cell" title={`X${x.toFixed(1)} Y${y.toFixed(1)}  ${z.toFixed(3)} mm`}
+            style={{ background: `color-mix(in srgb, var(--accent) ${Math.round(t * 100)}%, var(--panel2))`, color: t > 0.55 ? 'var(--accent-text)' : 'var(--text)' }}>
+            {z.toFixed(2)}
+          </div>
+        );
+      }))}
+    </div>
+  );
+}
+
+function AutolevelPanel({ m }: { m: Machine }) {
+  const [form, setForm] = useState<AlForm>(() => {
+    try { return { ...AL_DEFAULTS, ...JSON.parse(localStorage.getItem('alForm') ?? '{}') }; } catch { return AL_DEFAULTS; }
+  });
+  const [loadErr, setLoadErr] = useState('');
+  const file = useRef<HTMLInputElement>(null);
+  const set = (k: keyof AlForm, v: number) => {
+    const next = { ...form, [k]: v };
+    setForm(next);
+    localStorage.setItem('alForm', JSON.stringify(next));
+  };
+  const j = m.job;
+  const jobBusy = j.state === 'running' || j.state === 'paused';
+  const ready = m.connection.connected && m.status.state === 'Idle' && m.probe.phase === 'idle' && !jobBusy;
+  const hm = m.heightmap;
+  const flat = hm?.z.flat() ?? [];
+  const useBounds = () => {
+    if (!j.bounds) return;
+    const b = j.bounds, r = (n: number) => Math.round(n * 100) / 100;
+    const next = { ...form, minX: r(b.minX), maxX: r(b.maxX), minY: r(b.minY), maxY: r(b.maxY) };
+    setForm(next);
+    localStorage.setItem('alForm', JSON.stringify(next));
+  };
+  const scan = () => {
+    const a: AutolevelParams = { ...form };
+    m.send({ type: 'probeStart', kind: 'autolevel', settings: toSettings(loadProbeForm(), 'pcb'), autolevel: a });
+  };
+  const load = async (f: File) => {
+    try { m.send({ type: 'heightmapLoad', map: JSON.parse(await f.text()) }); setLoadErr(''); } catch { setLoadErr('That file is not a height map (invalid JSON)'); }
+  };
+  const points = form.cols * form.rows;
+
+  return (
+    <Panel title="Autolevel" className="autolevel">
+      <div className="muted small">
+        Scan the board surface, then apply the height map to your G-code. The result is a new levelled program you can inspect, download and run.
+      </div>
+      <details open={!hm}>
+        <summary className="muted small">1. Scan settings ({points} points)</summary>
+        <div className="pform">
+          {AL_FIELDS.map((f) => (
+            <label key={f.key}>
+              <span>{f.label}</span>
+              <input type="number" step={f.step ?? 'any'} value={form[f.key]} onChange={(e) => set(f.key, Number(e.target.value))} />
+              <span className="muted">{f.unit}</span>
+            </label>
+          ))}
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="btn small" disabled={!j.bounds} onClick={useBounds} title={j.bounds ? '' : 'Load a G-code file first'}>Use loaded G-code area</button>
+        </div>
+      </details>
+      <div className="row">
+        <button className="btn primary" disabled={!ready} onClick={scan}>Start scan</button>
+        <span className="muted small">Work zero must be on the board surface.</span>
+      </div>
+
+      {hm && (
+        <>
+          <div className="muted small">
+            2. Height map: {hm.cols} × {hm.rows} points, {new Date(hm.scannedAt).toLocaleString()}.
+            Surface varies <b>{(Math.max(...flat) - Math.min(...flat)).toFixed(3)} mm</b> (low {Math.min(...flat).toFixed(3)}, high {Math.max(...flat).toFixed(3)}).
+          </div>
+          <HeatGrid map={hm} />
+          <div className="row wrap">
+            <a className="btn small" href="/api/heightmap.json" download="heightmap.json">Download</a>
+            <button className="btn small" onClick={() => file.current?.click()}>Load…</button>
+            <button className="btn small" onClick={() => m.send({ type: 'heightmapClear' })}>Clear</button>
+          </div>
+        </>
+      )}
+      {!hm && <div className="row wrap"><button className="btn small" onClick={() => file.current?.click()}>Load a saved height map…</button></div>}
+      <input ref={file} type="file" accept=".json,application/json" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) load(f); e.target.value = ''; }} />
+      {loadErr && <div className="err">{loadErr}</div>}
+
+      <div className="row wrap">
+        <button className="btn primary" disabled={!hm || j.state === 'none' || jobBusy || m.probe.phase !== 'idle'} onClick={() => m.send({ type: 'jobLevel' })}>
+          3. Apply to G-code
+        </button>
+        <button className="btn" disabled={!j.leveled || jobBusy} onClick={() => m.send({ type: 'jobRevert' })}>Use original</button>
+        {j.leveled && <a className="btn" href="/api/job.nc" download>Download levelled G-code</a>}
+      </div>
+      {j.levelError && <div className="err">Not applied: {j.levelError}</div>}
+      {j.leveled && (
+        <div className="lvl">
+          <div><b>{j.name}</b>: {j.leveled.linesBefore} → {j.leveled.linesAfter} lines. Z corrected by {j.leveled.minDelta.toFixed(3)} to {j.leveled.maxDelta.toFixed(3)} mm.</div>
+          {j.bounds && <div className="muted small">Program area X {j.bounds.minX.toFixed(1)} to {j.bounds.maxX.toFixed(1)}, Y {j.bounds.minY.toFixed(1)} to {j.bounds.maxY.toFixed(1)} mm</div>}
+          {j.leveled.warnings.map((w) => <div key={w} className="warn-line">⚠ {w}</div>)}
+        </div>
+      )}
+    </Panel>
   );
 }
