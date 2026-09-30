@@ -6,6 +6,8 @@ interface Move extends Vec { feed: number; rapid: boolean; probe?: { axis: 'x' |
 
 const PLANNER_SIZE = 15;
 const RAPID_RATE = 3000; // mm/min
+/** How far below the block's top edge the tool must be to reach its side faces */
+const SIDE_MARGIN = 2;
 
 /**
  * A virtual corner block the simulated probe can touch, in machine coordinates.
@@ -177,10 +179,15 @@ export class SimulatorTransport extends EventEmitter implements Transport {
     return at.x >= xFace - e && at.y >= yFace - e && at.z <= zTop + e;
   }
 
-  /** Clamp a probe move to the block surface it is travelling into, if it made contact. */
+  /**
+   * Clamp a probe move to the block surface it is travelling into, if it made contact.
+   * The side faces only exist below the top edge: a tool travelling sideways at
+   * (or above) the top height rides over the block and touches nothing.
+   */
   private contact(axis: 'x' | 'y' | 'z', p: Vec): Vec | undefined {
     if (!this.probeTriggered(p)) return undefined;
     const { zTop, xFace, yFace } = this.surfaces;
+    if (axis !== 'z' && p.z > zTop - SIDE_MARGIN) return undefined;
     return { ...p, [axis]: axis === 'z' ? zTop : axis === 'x' ? xFace : yFace };
   }
 

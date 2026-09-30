@@ -21,7 +21,7 @@ const LOCK_REASON = 'Probe in progress: confirm the probe dialog first';
 // Geometry of the XYZ touch block procedure, carried over from DemonX V1.
 const XYZ_LIFT = 3;         // Z lift after the top-of-block probe
 const XYZ_SIDE_OFFSET = 25; // X move to the left of the block before probing X
-const XYZ_DROP = 10;        // Z drop to reach the block's side faces
+const XYZ_DROP = 10;        // Z drop beside the block; net depth below its top = DROP - LIFT (7 mm)
 const XYZ_BACKOFF = 10;     // move away from the face after setting zero
 const XYZ_Y_START_X = 5;    // absolute work X used for the Y probe
 
@@ -144,8 +144,8 @@ export class ProbeManager extends EventEmitter {
       moved = true;
       await this.cmd('Setting millimetres', 'G21');
       await this.cmd('Setting relative mode', 'G91');
-      if (kind === 'z') await this.zCycle(s, s.plateZ);
-      else if (kind === 'pcb') await this.zCycle(s, 0);
+      if (kind === 'z') await this.zCycle(s, s.plateZ, s.clearance);
+      else if (kind === 'pcb') await this.zCycle(s, 0, s.clearance);
       else await this.xyzCycle(s);
       await this.cmd('Restoring absolute mode', 'G90');
       this.ctl.log('sys', `${this.info.title} complete`);
@@ -159,17 +159,21 @@ export class ProbeManager extends EventEmitter {
     }
   }
 
-  private async zCycle(s: ProbeSettings, plateZ: number) {
+  /** @param finalLift how far to lift after setting Z zero */
+  private async zCycle(s: ProbeSettings, plateZ: number, finalLift: number) {
     await this.probe('Z fast pass', `G38.2 Z-${n(s.maxZ)} F${n(s.feedFast)}`, s.maxZ, s.feedFast);
     await this.move('Retracting', `G0 Z${n(s.retract)}`);
     const z = await this.probe('Z fine pass', `G38.2 Z-${n(s.retract + 2)} F${n(s.feedFine)}`, s.retract + 2, s.feedFine);
     this.record({ z: z.z });
     await this.cmd('Setting Z zero', `G10 L20 P0 Z${n(plateZ)}`);
-    await this.move('Retracting to clearance', `G0 Z${n(s.clearance)}`);
+    await this.move('Retracting', `G0 Z${n(finalLift)}`);
   }
 
   private async xyzCycle(s: ProbeSettings) {
-    await this.zCycle(s, s.plateZ);
+    // Lift only XYZ_LIFT here (not the full clearance): the drop below then leaves
+    // the tool XYZ_DROP - XYZ_LIFT beside the block's side faces. Lifting the full
+    // clearance first put the tool level with the block top and it rode over the edge.
+    await this.zCycle(s, s.plateZ, XYZ_LIFT);
     const r = s.endmill / 2;
     const side = async (axis: 'X' | 'Y', thickness: number) => {
       await this.probe(`${axis} fast pass`, `G38.2 ${axis}${n(s.maxXY)} F${n(s.feedFast)}`, s.maxXY, s.feedFast);

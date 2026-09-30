@@ -83,6 +83,9 @@ describe('probe safety flow', () => {
     expect(c.status.wco.x).toBeCloseTo(-8 + r + s.plateX, 2);
     expect(c.status.wco.y).toBeCloseTo(-8 + r + s.plateY, 2);
     expect(c.status.wco.z).toBeCloseTo(-10 - s.plateZ, 2);
+    // Side faces are probed 7 mm below the block top (lift 3, drop 10); the final
+    // 10 mm retract then ends 3 mm above the top, exactly as V1 did.
+    expect(c.status.wpos.z).toBeCloseTo(s.plateZ + 3, 2);
     await c.disconnect();
   }, 90000);
 
